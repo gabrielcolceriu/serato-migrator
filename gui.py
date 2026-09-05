@@ -353,12 +353,12 @@ def _show_dialog(parent, title: str, message: str, yesno: bool = False) -> bool:
         win.destroy()
 
     btns = ttk.Frame(frame)
-    btns.pack(anchor="e")
+    btns.pack()   # centrat orizontal
     if yesno:
-        ttk.Button(btns, text="Nu", command=lambda: close(False)).pack(side="right", padx=(6, 0))
-        ttk.Button(btns, text="Da", command=lambda: close(True)).pack(side="right")
+        ttk.Button(btns, text="Da", command=lambda: close(True)).pack(side="left", padx=(0, 6))
+        ttk.Button(btns, text="Nu", command=lambda: close(False)).pack(side="left")
     else:
-        ttk.Button(btns, text="OK", command=lambda: close(True)).pack(side="right")
+        ttk.Button(btns, text="OK", command=lambda: close(True)).pack()
 
     win.update_idletasks()
     w, h = win.winfo_width(), win.winfo_height()
