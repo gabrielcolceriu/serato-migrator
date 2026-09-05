@@ -19,6 +19,10 @@ Files" manual.
   foldere dupa crate, copiaza folderul `_Serato_`, rescrie caile din baza de
   date copiata, si normalizeaza numele de fisiere scrise complet cu
   majuscule. Fisierele originale nu sunt niciodata sterse sau modificate.
+- **Metadata** – gaseste track-uri unde artistul lipseste (sau e ingropat in
+  titlu, gen "Artist - Titlu") si permite revizuirea si aplicarea corectiei,
+  plus editare individuala sau de grup a Artist/Titlu/Album/Gen. Scrie atat
+  in baza de date Serato cat si in tag-urile ID3 ale fisierelor (`mutagen`).
 
 ## Cum functioneaza
 
