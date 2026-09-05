@@ -16,7 +16,7 @@ import scanner
 import copier
 
 APP_TITLE = "Serato Migrator"
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.5.0"
 
 BASE_FONT_SIZE = 14
 MONO_FONT_SIZE = 13
@@ -966,6 +966,14 @@ class SeratoMigratorApp:
         self.check_missing_btn.pack(side="left", padx=2)
         _Tooltip(self.check_missing_btn, "Verifica track-uri lipsa (cauta pe disk daca au fost mutate)")
 
+        self.rebuild_db_btn = ttk.Button(top, text="Reconstruieste baza de date",
+                                          command=self._rebuild_database)
+        self.rebuild_db_btn.pack(side="left", padx=(12, 2))
+        _Tooltip(self.rebuild_db_btn,
+                 "Genereaza o baza de date noua pentru biblioteca selectata, "
+                 "pastrand DOAR track-urile care exista fizic pe acel volum "
+                 "(cele efectiv puse pe disc). Face intai backup la _Serato_.")
+
         cols = ("nume", "radacina", "tracks", "prezente", "lipsa", "crate_uri")
         self.libs_tree = ttk.Treeview(self.tab_libs, columns=cols, show="headings", height=10)
         headings = {
@@ -1100,6 +1108,73 @@ class SeratoMigratorApp:
         missing_list.pack(fill="both", expand=True)
         for track in still_missing:
             missing_list.insert("", END, values=(track.abs_path,))
+
+    # ------------------------------------------ Reconstruieste baza de date
+    def _rebuild_database(self):
+        sel = self.libs_tree.selection()
+        if not sel:
+            show_warning(self.root, APP_TITLE, "Selecteaza mai intai o biblioteca din lista.")
+            return
+        lib = next((l for l in self.libraries if l.name == sel[0]), None)
+        if not lib:
+            return
+        if not self._guard_serato_not_running():
+            return
+
+        present = len(lib.present_tracks)
+        missing = len(lib.missing_tracks)
+        if not ask_yesno(
+            self.root, APP_TITLE,
+            f"Se genereaza o bază de date NOUĂ pentru '{lib.name}' ({lib.volume_root}).\n\n"
+            f"Se pastreaza doar track-urile care exista fizic pe acest volum: "
+            f"~{present} track-uri.\n"
+            f"Se scot ~{missing} intrari catre fisiere care nu sunt pe disc, plus "
+            f"crate-urile ramase goale.\n\n"
+            f"Folderul _Serato_ actual e salvat intai ca backup (_Serato_ (backup ...)). "
+            f"Metadata fiecarui track (BPM, key, bitrate...) se pastreaza.\n\n"
+            f"Continui?",
+        ):
+            return
+
+        self.rebuild_db_btn["state"] = "disabled"
+        self.set_status("Reconstruiesc baza de date...")
+        self.log(f"Reconstruiesc baza de date pentru '{lib.name}' - backup + filtrare la fisierele de pe disc...")
+        self._begin_busy("reconstruire baza de date")
+        q: queue.Queue = queue.Queue()
+
+        def work():
+            try:
+                res = copier.rebuild_database_from_disk(lib)
+                q.put(("ok", res))
+            except Exception as exc:  # noqa: BLE001
+                q.put(("err", repr(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(200, lambda: self._poll_rebuild(q))
+
+    def _poll_rebuild(self, q: queue.Queue):
+        try:
+            kind, payload = q.get_nowait()
+        except queue.Empty:
+            self.root.after(200, lambda: self._poll_rebuild(q))
+            return
+        self._end_busy("reconstruire baza de date")
+        self.rebuild_db_btn["state"] = "normal"
+        if kind == "err":
+            self.set_status("Reconstruire esuata.")
+            self.log(f"EROARE la reconstruirea bazei: {payload}")
+            show_warning(self.root, APP_TITLE, f"Reconstruirea a esuat:\n\n{payload}")
+            return
+        res = payload
+        msg = (f"Bază de date nouă scrisă.\n\n"
+               f"Track-uri pastrate: {res.tracks_kept}\n"
+               f"Intrari scoase (fisier lipsa): {res.tracks_dropped}\n"
+               f"Crate-uri pastrate: {res.crates_kept}   |   goale scoase: {res.crates_dropped}\n\n"
+               f"Backup: {res.backup_dir}")
+        self.set_status("Reconstruire terminata.")
+        self.log("Reconstruire terminata. " + msg.replace("\n", " "))
+        show_info(self.root, APP_TITLE, msg)
+        self.refresh_libraries()
 
     # ---------------------------------------------------------- Tab Crate-uri
     def _build_tab_crates(self):
@@ -1355,13 +1430,19 @@ class SeratoMigratorApp:
             right, text="Rescrie caile in copia bazei de date (Serato vede totul fara 'Locate Missing Files')",
             variable=self.rewrite_paths_var).grid(row=2, column=0, columnspan=3, sticky=W)
 
+        self.fresh_db_var = BooleanVar(value=False)
+        ttk.Checkbutton(
+            right, text="In loc de copiere: GENEREAZA o baza de date noua, doar cu track-urile "
+                        "si crate-urile migrate (recomandat cand alegi doar cateva crate-uri)",
+            variable=self.fresh_db_var).grid(row=3, column=0, columnspan=3, sticky=W)
+
         self.normalize_names_var = BooleanVar(value=True)
         ttk.Checkbutton(
             right, text="Normalizeaza numele SCRISE COMPLET CU MAJUSCULE la Title Case normal",
-            variable=self.normalize_names_var).grid(row=3, column=0, columnspan=3, sticky=W)
+            variable=self.normalize_names_var).grid(row=4, column=0, columnspan=3, sticky=W)
 
         btns = ttk.Frame(right)
-        btns.grid(row=4, column=0, columnspan=3, pady=10, sticky=W)
+        btns.grid(row=5, column=0, columnspan=3, pady=10, sticky=W)
         ttk.Button(btns, text="Previzualizare", command=self._preview_migration).pack(side="left")
         self.copy_btn = ttk.Button(btns, text="Copiaza acum", command=self._run_migration, state="disabled")
         self.copy_btn.pack(side="left", padx=6)
@@ -1672,11 +1753,12 @@ class SeratoMigratorApp:
         if not self._plan or not self._plan.operations:
             return
 
-        copy_serato = self.copy_serato_var.get()
-        if copy_serato and not self._guard_serato_not_running():
-            return
+        fresh_db = self.fresh_db_var.get()
+        copy_serato = self.copy_serato_var.get() and not fresh_db
 
         selected_libs = self._selected_libraries()
+        if (copy_serato or fresh_db) and not self._guard_serato_not_running():
+            return
         if copy_serato and len(selected_libs) != 1:
             show_warning(
                 self.root, APP_TITLE,
@@ -1704,7 +1786,11 @@ class SeratoMigratorApp:
                     return
 
         extra_msg = ""
-        if copy_serato:
+        if fresh_db:
+            extra_msg = ("\n\nSe GENEREAZA o baza de date noua in _Serato_ la destinatie, "
+                         "doar cu track-urile si crate-urile migrate (nu se copiaza baza veche). "
+                         "Originalul NU e atins.")
+        elif copy_serato:
             extra_msg = (f"\n\nSe copiaza si folderul _Serato_ (baza de date + crate-urile) "
                          f"al bibliotecii '{selected_libs[0].name}' la radacina destinatiei.")
         if rewrite_paths:
@@ -1731,7 +1817,11 @@ class SeratoMigratorApp:
         def work():
             try:
                 copier.execute_plan(plan, progress_callback=progress_cb)
-                if copy_serato:
+                if fresh_db:
+                    self._progress_queue.put(("fresh_start",))
+                    copier.write_fresh_serato(selected_libs, plan, dest_root / "_Serato_", dest_root)
+                    self._progress_queue.put(("fresh_done",))
+                elif copy_serato:
                     self._progress_queue.put(("serato_start",))
                     dest_serato_dir = copier.copy_serato_folder(selected_libs[0], dest_root)
                     self._progress_queue.put(("serato_done",))
@@ -1778,6 +1868,13 @@ class SeratoMigratorApp:
                 if item[0] == "rewrite_done":
                     self.log("Caile din copia bazei de date au fost actualizate. "
                               "Serato ar trebui sa vada track-urile direct, fara relocate.")
+                    continue
+                if item[0] == "fresh_start":
+                    self.set_status("Generez baza de date noua (doar ce s-a migrat)...")
+                    self.log("Generez _Serato_/database V2 nou + crate-urile migrate la destinatie...")
+                    continue
+                if item[0] == "fresh_done":
+                    self.log("Baza de date noua scrisa. Serato o vede direct, doar cu track-urile migrate.")
                     continue
                 done, total, op = item
                 self.progress["value"] = done

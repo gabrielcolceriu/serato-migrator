@@ -210,6 +210,159 @@ def rewrite_serato_database(lib: SeratoLibrary, plan: CopyPlan, dest_serato_dir:
         crate_dest_path.write_bytes(serato_db.serialize_tlv(entries))
 
 
+def write_fresh_serato(
+    libraries: list[SeratoLibrary], plan: CopyPlan, dest_serato_dir: Path, dest_root: Path
+):
+    """Construieste un `_Serato_` NOU la destinatie, de la zero:
+      - `database V2` nou, doar cu track-urile efectiv migrate (o intrare per
+        fisier fizic), cu caile catre noua locatie; metadata fiecarui track e
+        clonata din otrk-ul original (BPM, key, bitrate, an, comentarii...),
+        sau minimala daca track-ul nu era in baza sursa.
+      - doar fisierele `.crate` ale crate-urilor migrate, cu antetul original
+        (coloane + sortare) pastrat si lista de track-uri inlocuita.
+    Folderul `_Serato_` sursa NU e citit decat pentru metadata si NU e copiat.
+    Suporta mai multe biblioteci - se imbina intr-o singura baza noua.
+    """
+    dest_root = Path(dest_root)
+    dest_serato_dir = Path(dest_serato_dir)
+    (dest_serato_dir / "Subcrates").mkdir(parents=True, exist_ok=True)
+
+    otrk_list: list[list] = []
+    vrsn_value: bytes | None = None
+
+    for lib in libraries:
+        my_ops = [op for op in plan.operations if op.library_name == lib.name]
+        if not my_ops:
+            continue
+
+        src_db = lib.serato_dir / "database V2"
+        src_idx: dict[str, list] = {}
+        if src_db.is_file():
+            v, src_idx = serato_db.index_otrk_by_path(src_db.read_bytes())
+            if vrsn_value is None and v:
+                vrsn_value = v
+
+        for op in my_ops:
+            if not op.is_primary:
+                continue
+            new_rel = op.dest_path.relative_to(dest_root).as_posix()
+            src_fields = src_idx.get(op.raw_path)
+            if src_fields is not None:
+                otrk_list.append(serato_db.otrk_with_path(src_fields, new_rel))
+            else:
+                ext = op.dest_path.suffix.lower().lstrip(".")
+                otrk_list.append(serato_db.minimal_otrk(new_rel, ext or None))
+
+        # crate-urile migrate ale acestei biblioteci
+        ops_by_crate: dict[str, list[CopyOperation]] = {}
+        for op in my_ops:
+            if op.crate_key is not None:
+                ops_by_crate.setdefault(op.crate_key, []).append(op)
+
+        crate_by_key = {str(c.file_path): c for c in lib.crates}
+        for crate_key, crate_ops in ops_by_crate.items():
+            crate = crate_by_key.get(crate_key)
+            if crate is None:
+                continue
+            rel_by_raw = {
+                op.raw_path: op.dest_path.relative_to(dest_root).as_posix()
+                for op in crate_ops
+            }
+            # pastreaza ordinea originala a track-urilor in crate
+            ordered = [rel_by_raw[rp] for rp in crate.raw_paths if rp in rel_by_raw]
+            src_bytes = crate.file_path.read_bytes() if crate.file_path.is_file() else None
+            out = serato_db.build_crate(ordered, source_crate_bytes=src_bytes)
+            (dest_serato_dir / "Subcrates" / crate.file_path.name).write_bytes(out)
+
+    (dest_serato_dir / "database V2").write_bytes(
+        serato_db.build_database(otrk_list, vrsn_value)
+    )
+
+
+@dataclass
+class RebuildResult:
+    backup_dir: Path
+    tracks_kept: int
+    tracks_dropped: int
+    crates_kept: int
+    crates_dropped: int
+
+
+def rebuild_database_from_disk(
+    library: SeratoLibrary, include_unknown_audio: bool = False
+) -> RebuildResult:
+    """Reconstruieste PE LOC `_Serato_/database V2` + fisierele `.crate` ale unei
+    biblioteci, pastrand DOAR track-urile al caror fisier exista fizic pe disc
+    (adica cele efectiv puse pe acest volum). Face intai un backup complet al
+    folderului `_Serato_`. Metadata per track e clonata din baza veche.
+
+    include_unknown_audio: daca True, adauga in baza si fisierele audio gasite
+    pe volum care nu apar in nicio intrare - Serato le completeaza la scanare.
+    """
+    serato_dir = Path(library.serato_dir)
+    vol = Path(library.volume_root)
+
+    stamp = time.strftime("%Y-%m-%d_%H%M%S")
+    backup_dir = serato_dir.with_name(f"_Serato_ (backup {stamp})")
+    shutil.copytree(serato_dir, backup_dir)
+
+    db_path = serato_dir / "database V2"
+    vrsn_value, src_idx = (None, {})
+    if db_path.is_file():
+        vrsn_value, src_idx = serato_db.index_otrk_by_path(db_path.read_bytes())
+
+    def present(raw_path: str) -> bool:
+        return (vol / raw_path).is_file()
+
+    # --- crate-uri: filtreaza track-urile lipsa, arunca crate-urile goale ---
+    crates_kept = crates_dropped = 0
+    kept_raw: set[str] = set()
+    subcrates = serato_dir / "Subcrates"
+    if subcrates.is_dir():
+        for cf in sorted(subcrates.glob("*.crate")):
+            raw_paths = serato_db.parse_crate(cf)
+            keep = [rp for rp in raw_paths if present(rp)]
+            if not keep:
+                cf.unlink()
+                crates_dropped += 1
+                continue
+            cf.write_bytes(serato_db.build_crate(keep, source_crate_bytes=cf.read_bytes()))
+            kept_raw.update(keep)
+            crates_kept += 1
+
+    # --- database V2 nou ---
+    all_present = [rp for rp in src_idx if present(rp)]
+    dropped = len(src_idx) - len(all_present)
+
+    if include_unknown_audio:
+        from scanner import AUDIO_EXTENSIONS, _walk_audio_files
+        known = set(all_present)
+        for p in _walk_audio_files(vol):
+            rel = p.relative_to(vol).as_posix()
+            if rel not in known and p.suffix.lower() in AUDIO_EXTENSIONS:
+                all_present.append(rel)
+                known.add(rel)
+
+    otrk_list = []
+    for rp in all_present:
+        fields = src_idx.get(rp)
+        if fields is not None:
+            otrk_list.append(list(fields))
+        else:
+            ext = Path(rp).suffix.lower().lstrip(".")
+            otrk_list.append(serato_db.minimal_otrk(rp, ext or None))
+
+    db_path.write_bytes(serato_db.build_database(otrk_list, vrsn_value))
+
+    return RebuildResult(
+        backup_dir=backup_dir,
+        tracks_kept=len(otrk_list),
+        tracks_dropped=dropped,
+        crates_kept=crates_kept,
+        crates_dropped=crates_dropped,
+    )
+
+
 def crate_stats(lib: SeratoLibrary, crate) -> tuple[int, int, int]:
     """(track-uri prezente, track-uri lipsa, bytes prezenti) pentru un crate.
     Bytes-ii numara fiecare fisier fizic o singura data chiar daca apare de mai
