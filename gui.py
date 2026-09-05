@@ -1013,6 +1013,13 @@ class SeratoMigratorApp:
                  "pastrand DOAR track-urile care exista fizic pe acel volum "
                  "(cele efectiv puse pe disc). Face intai backup la _Serato_.")
 
+        self.export_db_btn = ttk.Button(top, text="Exporta baza de date",
+                                         command=self._export_database)
+        self.export_db_btn.pack(side="left", padx=(12, 2))
+        _Tooltip(self.export_db_btn,
+                 "Salveaza baza de date a bibliotecii selectate (database V2 + "
+                 "crate-uri + pref-uri) intr-un .zip. Fara waveform-uri.")
+
         cols = ("nume", "radacina", "tracks", "prezente", "lipsa", "crate_uri")
         self.libs_tree = ttk.Treeview(self.tab_libs, columns=cols, show="headings", height=10)
         headings = {
@@ -1147,6 +1154,34 @@ class SeratoMigratorApp:
         missing_list.pack(fill="both", expand=True)
         for track in still_missing:
             missing_list.insert("", END, values=(track.abs_path,))
+
+    def _export_database(self):
+        sel = self.libs_tree.selection()
+        if not sel:
+            show_warning(self.root, APP_TITLE, "Selecteaza mai intai o biblioteca din lista.")
+            return
+        lib = next((l for l in self.libraries if l.name == sel[0]), None)
+        if not lib:
+            return
+        stamp = time.strftime("%Y-%m-%d")
+        safe = "".join(c if c.isalnum() or c in " -_" else "_" for c in lib.name).strip()
+        dest = filedialog.asksaveasfilename(
+            title="Salveaza export baza de date",
+            defaultextension=".zip",
+            initialfile=f"Serato DB - {safe} - {stamp}.zip",
+            filetypes=[("Arhiva ZIP", "*.zip")],
+        )
+        if not dest:
+            return
+        try:
+            n = copier.export_database(lib, Path(dest))
+        except Exception as exc:  # noqa: BLE001
+            self.log(f"EROARE la export: {exc}")
+            show_warning(self.root, APP_TITLE, f"Exportul a esuat:\n\n{exc}")
+            return
+        size = _human_size(Path(dest).stat().st_size)
+        self.log(f"Export baza de date '{lib.name}' -> {dest} ({n} fisiere, {size}).")
+        show_info(self.root, APP_TITLE, f"Baza de date exportata:\n\n{dest}\n\n{n} fisiere, {size}.")
 
     # ------------------------------------------ Reconstruieste baza de date
     def _rebuild_database(self):
