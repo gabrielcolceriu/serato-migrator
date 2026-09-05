@@ -24,6 +24,8 @@ from PyObjCTools import AppHelper
 import scanner
 import copier
 
+from . import theme
+
 _AUTOSIZE = (1 << 1) | (1 << 4)  # width | height
 
 
@@ -167,7 +169,7 @@ class OverviewScreen(BaseScreen):
         self._stack.addArrangedSubview_(_label(str(lib.volume_root), secondary=True))
         self._stack.addArrangedSubview_(_label(health, bold=True, size=15))
         self._stack.addArrangedSubview_(_label(
-            f"{present:,} track-uri     {len(lib.crates):,} crate-uri     {missing:,} lipsă".replace(",", ".")))
+            f"{theme.format_int(present)} track-uri     {theme.format_int(len(lib.crates))} crate-uri     {theme.format_int(missing)} lipsă"))
         self._stack.addArrangedSubview_(_button("Scanează din nou", self._app, b"rescanLibraries:"))
 
 
@@ -199,17 +201,17 @@ class LibrariesScreen(BaseScreen):
 
     def render(self):
         libs = self._app.libraries()
-        rows = [(l.name, str(l.volume_root), f"{len(l.tracks):,}".replace(",", "."),
-                 f"{len(l.present_tracks):,}".replace(",", "."),
-                 f"{len(l.missing_tracks):,}".replace(",", "."),
-                 f"{len(l.crates):,}".replace(",", ".")) for l in libs]
+        rows = [(l.name, str(l.volume_root), theme.format_int(len(l.tracks)),
+                 theme.format_int(len(l.present_tracks)),
+                 theme.format_int(len(l.missing_tracks)),
+                 theme.format_int(len(l.crates))) for l in libs]
         self._ds.setData_(rows)
         self._tv.reloadData()
         tot_tracks = sum(len(l.tracks) for l in libs)
         tot_missing = sum(len(l.missing_tracks) for l in libs)
         tot_crates = sum(len(l.crates) for l in libs)
         self._summary.setStringValue_(
-            f"{len(libs)} Bibliotecă · {tot_tracks:,} Track-uri · {tot_missing:,} Lipsă · {tot_crates:,} Crate-uri".replace(",", "."))
+            f"{len(libs)} Bibliotecă · {theme.format_int(tot_tracks)} Track-uri · {theme.format_int(tot_missing)} Lipsă · {theme.format_int(tot_crates)} Crate-uri")
 
 
 # ------------------------------------------------------------------- Crates
@@ -357,7 +359,7 @@ class MigrateScreen(BaseScreen):
         lib = self._app.activeLibrary()
         if lib:
             self._src.setStringValue_(
-                f"Sursă: {lib.name} — {lib.volume_root} · {len(lib.present_tracks):,} track-uri · {len(lib.crates):,} crate-uri".replace(",", "."))
+                f"Sursă: {lib.name} — {lib.volume_root} · {theme.format_int(len(lib.present_tracks))} track-uri · {theme.format_int(len(lib.crates))} crate-uri")
         else:
             self._src.setStringValue_("Sursă: (nicio bibliotecă)")
 
@@ -501,6 +503,10 @@ def make_screen(dest_id, delegate):
 
 
 def _human(n: int) -> str:
+    return theme.human_size(n)
+
+
+def _human_OLD(n: int) -> str:
     size = float(n or 0)
     for unit in ("B", "KB", "MB", "GB", "TB"):
         if size < 1024:

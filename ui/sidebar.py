@@ -19,6 +19,8 @@ from AppKit import (
 )
 from Foundation import NSObject, NSMakeRect, NSNotificationCenter, NSIndexSet
 
+from . import theme
+
 # (id, label, sf-symbol, is_group_header)
 NAV = [
     ("overview", "Prezentare", "square.grid.2x2", False),
@@ -78,7 +80,7 @@ class SidebarController(NSObject):
             return
         missing = len(lib.missing_tracks)
         self._f_name.setStringValue_(lib.name)
-        self._f_count.setStringValue_(f"{len(lib.present_tracks):,} track-uri".replace(",", "."))
+        self._f_count.setStringValue_(f"{theme.format_int(len(lib.present_tracks))} track-uri")
         if missing == 0:
             self._f_health.setStringValue_("✓ Totul este în regulă")
             self._f_health.setTextColor_(NSColor.secondaryLabelColor())
