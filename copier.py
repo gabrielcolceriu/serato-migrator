@@ -103,7 +103,17 @@ def copy_serato_folder(lib: SeratoLibrary, dest_root: Path) -> Path:
     return dest_serato
 
 
-def plan_copy(libraries: list[SeratoLibrary], dest_root: Path, normalize_names: bool = True) -> CopyPlan:
+def plan_copy(
+    libraries: list[SeratoLibrary],
+    dest_root: Path,
+    normalize_names: bool = True,
+    selected_crate_keys: set[str] | None = None,
+    include_unsorted: bool = True,
+) -> CopyPlan:
+    """selected_crate_keys: daca e dat, se migreaza doar crate-urile a caror cheie
+    (str(crate.file_path)) e in set; restul sunt ignorate complet.
+    include_unsorted: daca e False, track-urile care nu apar in niciun crate
+    (migrat) nu sunt copiate in folderul "Ne-incadrate in crate-uri"."""
     dest_root = Path(dest_root)
     operations: list[CopyOperation] = []
     skipped_missing: list[Path] = []
@@ -116,8 +126,10 @@ def plan_copy(libraries: list[SeratoLibrary], dest_root: Path, normalize_names: 
 
     for lib in libraries:
         for crate in lib.crates:
-            crate_dir = dest_root.joinpath(*crate.hierarchy)
             crate_key = str(crate.file_path)
+            if selected_crate_keys is not None and crate_key not in selected_crate_keys:
+                continue
+            crate_dir = dest_root.joinpath(*crate.hierarchy)
             for raw_path in crate.raw_paths:
                 src = Path(lib.volume_root) / raw_path
                 if not src.exists():
@@ -135,6 +147,8 @@ def plan_copy(libraries: list[SeratoLibrary], dest_root: Path, normalize_names: 
                                                  crate_key=crate_key))
 
         # track-uri cunoscute de biblioteca dar care nu apar in niciun crate
+        if not include_unsorted:
+            continue
         unsorted_dir = dest_root / UNSORTED_FOLDER_NAME / lib.name
         for raw_path, track in lib.tracks.items():
             src = Path(track.abs_path)
@@ -194,6 +208,27 @@ def rewrite_serato_database(lib: SeratoLibrary, plan: CopyPlan, dest_serato_dir:
         entries = serato_db.parse_tlv(crate_dest_path.read_bytes())
         entries = serato_db.rewrite_paths(entries, "ptrk", new_by_raw)
         crate_dest_path.write_bytes(serato_db.serialize_tlv(entries))
+
+
+def crate_stats(lib: SeratoLibrary, crate) -> tuple[int, int, int]:
+    """(track-uri prezente, track-uri lipsa, bytes prezenti) pentru un crate.
+    Bytes-ii numara fiecare fisier fizic o singura data chiar daca apare de mai
+    multe ori in crate."""
+    present = missing = 0
+    seen: set[str] = set()
+    total = 0
+    for raw_path in crate.raw_paths:
+        full = os.path.join(lib.volume_root, raw_path)
+        try:
+            st = os.stat(full)
+        except OSError:
+            missing += 1
+            continue
+        present += 1
+        if full not in seen:
+            seen.add(full)
+            total += st.st_size
+    return present, missing, total
 
 
 def dir_size(path: Path) -> int:

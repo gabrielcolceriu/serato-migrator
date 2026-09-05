@@ -22,7 +22,9 @@ Files" manual.
   La previzualizare calculeaza cat spatiu ii trebuie pe destinatie (copii +
   hardlink-uri care ajung pe alt volum + folderul `_Serato_`) si compara cu
   spatiul liber - daca **nu incape**, avertizeaza inainte si cere confirmare
-  explicita ca sa nu ramai cu o copiere oprita la jumatate.
+  explicita ca sa nu ramai cu o copiere oprita la jumatate. Poti alege exact
+  **ce crate-uri** migrezi (arbore cu bife, marime per crate + total live),
+  util cand biblioteca intreaga nu incape pe discul destinatie.
 - **Metadata** – gaseste track-uri unde artistul lipseste (sau e ingropat in
   titlu, gen "Artist - Titlu") si permite revizuirea si aplicarea corectiei,
   plus editare individuala sau de grup a Artist/Titlu/Album/Gen. Scrie atat
