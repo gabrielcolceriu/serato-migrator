@@ -19,6 +19,10 @@ Files" manual.
   foldere dupa crate, copiaza folderul `_Serato_`, rescrie caile din baza de
   date copiata, si normalizeaza numele de fisiere scrise complet cu
   majuscule. Fisierele originale nu sunt niciodata sterse sau modificate.
+  La previzualizare calculeaza cat spatiu ii trebuie pe destinatie (copii +
+  hardlink-uri care ajung pe alt volum + folderul `_Serato_`) si compara cu
+  spatiul liber - daca **nu incape**, avertizeaza inainte si cere confirmare
+  explicita ca sa nu ramai cu o copiere oprita la jumatate.
 - **Metadata** – gaseste track-uri unde artistul lipseste (sau e ingropat in
   titlu, gen "Artist - Titlu") si permite revizuirea si aplicarea corectiei,
   plus editare individuala sau de grup a Artist/Titlu/Album/Gen. Scrie atat

@@ -16,7 +16,7 @@ import scanner
 import copier
 
 APP_TITLE = "Serato Migrator"
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.3.0"
 
 BASE_FONT_SIZE = 14
 MONO_FONT_SIZE = 13
@@ -468,6 +468,10 @@ class SeratoMigratorApp:
                          background=APP_BG, foreground=TEXT_MUTED)
         style.configure("Status.TLabel", font=(None, BASE_FONT_SIZE), padding=6,
                          background=SURFACE, foreground=TEXT_MUTED)
+        style.configure("Warn.TLabel", font=(None, BASE_FONT_SIZE, "bold"),
+                         background=APP_BG, foreground="#B00020")
+        style.configure("Ok.TLabel", font=(None, BASE_FONT_SIZE),
+                         background=APP_BG, foreground="#1B7A3D")
 
         style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE)
         style.configure("TEntry", fieldbackground=SURFACE)
@@ -1259,7 +1263,7 @@ class SeratoMigratorApp:
         self.copy_serato_var = BooleanVar(value=True)
         self.copy_serato_check = ttk.Checkbutton(
             right, text="Copiaza si folderul _Serato_ (baza de date + crate-urile) la radacina destinatiei",
-            variable=self.copy_serato_var)
+            variable=self.copy_serato_var, command=self._refresh_space_label)
         self.copy_serato_check.grid(row=1, column=0, columnspan=3, sticky=W, pady=(6, 0))
 
         self.rewrite_paths_var = BooleanVar(value=True)
@@ -1280,6 +1284,11 @@ class SeratoMigratorApp:
 
         self.migrate_summary_var = StringVar(value="")
         ttk.Label(self.tab_migrate, textvariable=self.migrate_summary_var, justify="left").pack(fill="x", padx=4)
+
+        self.migrate_space_var = StringVar(value="")
+        self.migrate_space_lbl = ttk.Label(self.tab_migrate, textvariable=self.migrate_space_var,
+                                            justify="left", style="Ok.TLabel")
+        self.migrate_space_lbl.pack(fill="x", padx=4)
 
         self.progress = ttk.Progressbar(self.tab_migrate, orient=HORIZONTAL, mode="determinate")
         self.progress.pack(fill="x", padx=4, pady=4)
@@ -1329,6 +1338,45 @@ class SeratoMigratorApp:
 
         threading.Thread(target=work, daemon=True).start()
 
+    def _space_report(self, plan: copier.CopyPlan, copy_serato: bool):
+        """(required_bytes, free_bytes, fits) pentru planul curent si destinatie.
+        free_bytes poate fi None daca nu se poate afla spatiul liber."""
+        dest = self.dest_var.get().strip()
+        if not dest:
+            return None
+        selected = self._selected_libraries()
+        serato_dir = selected[0].serato_dir if (copy_serato and len(selected) == 1) else None
+        required = copier.estimate_required_bytes(plan, Path(dest), serato_dir)
+        free = copier.free_space(Path(dest))
+        fits = free is None or required <= free
+        return required, free, fits
+
+    def _refresh_space_label(self):
+        if not self._plan:
+            self.migrate_space_var.set("")
+            return
+        report = self._space_report(self._plan, self.copy_serato_var.get())
+        if report is None:
+            self.migrate_space_var.set("")
+            return
+        required, free, fits = report
+        if free is None:
+            self.migrate_space_lbl.configure(style="Ok.TLabel")
+            self.migrate_space_var.set(f"Necesar pe destinatie: ~{_human_size(required)} "
+                                        f"(spatiul liber nu a putut fi verificat).")
+            return
+        if fits:
+            self.migrate_space_lbl.configure(style="Ok.TLabel")
+            self.migrate_space_var.set(
+                f"Incape: necesar ~{_human_size(required)}, liber pe destinatie {_human_size(free)} "
+                f"(ramane ~{_human_size(free - required)}).")
+        else:
+            self.migrate_space_lbl.configure(style="Warn.TLabel")
+            self.migrate_space_var.set(
+                f"NU INCAPE: necesar ~{_human_size(required)}, liber pe destinatie doar "
+                f"{_human_size(free)}. Lipsesc ~{_human_size(required - free)}. "
+                f"Debifeaza biblioteci/foldere sau alege alta destinatie.")
+
     def _on_plan_ready(self, plan: copier.CopyPlan):
         self._plan = plan
         self.log(f"Plan gata: {plan.primary_count} copii, {plan.link_count} hardlink-uri, "
@@ -1340,6 +1388,12 @@ class SeratoMigratorApp:
             f"Track-uri lipsa (sarite): {len(plan.skipped_missing)}"
         )
         self.migrate_summary_var.set(summary)
+        self._refresh_space_label()
+        report = self._space_report(plan, self.copy_serato_var.get())
+        if report and report[1] is not None:
+            required, free, fits = report
+            verdict = "incape" if fits else f"NU INCAPE, lipsesc {_human_size(required - free)}"
+            self.log(f"Spatiu destinatie: necesar ~{_human_size(required)}, liber {_human_size(free)} -> {verdict}.")
         self.progress["value"] = 0
         self.progress["maximum"] = len(plan.operations)
         self.copy_btn["state"] = "normal" if plan.operations else "disabled"
@@ -1363,6 +1417,22 @@ class SeratoMigratorApp:
             return
 
         rewrite_paths = self.rewrite_paths_var.get() and copy_serato
+
+        report = self._space_report(self._plan, copy_serato)
+        if report is not None:
+            required, free, fits = report
+            if not fits and free is not None:
+                if not ask_yesno(
+                    self.root, APP_TITLE,
+                    f"NU INCAPE pe destinatie.\n\n"
+                    f"Necesar: ~{_human_size(required)}\n"
+                    f"Liber pe destinatie: {_human_size(free)}\n"
+                    f"Lipsesc: ~{_human_size(required - free)}\n\n"
+                    f"Copierea se va opri cu eroare cand se umple discul, iar biblioteca "
+                    f"Serato copiata va fi incompleta. Recomandat: renunta, debifeaza "
+                    f"biblioteci sau alege alta destinatie.\n\nContinui totusi?",
+                ):
+                    return
 
         extra_msg = ""
         if copy_serato:
