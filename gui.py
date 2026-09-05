@@ -421,6 +421,12 @@ class SeratoMigratorApp:
 
         self._setup_fonts()
 
+        # cate operatiuni lungi ruleaza acum (migrare, scanari, metadata) - cat
+        # timp e > 0 fereastra nu se poate inchide
+        self._busy_count = 0
+        self._busy_labels: list[str] = []
+        self.root.protocol("WM_DELETE_WINDOW", self._on_close)
+
         self.libraries: list[scanner.SeratoLibrary] = []
         self.lib_vars: dict[str, BooleanVar] = {}   # nume biblioteca -> checkbox inclus in migrare
 
@@ -589,6 +595,32 @@ class SeratoMigratorApp:
 
     def set_status(self, text: str):
         self.status_var.set(text)
+
+    # ------------------------------------------------ operatiuni in curs / close
+    def _begin_busy(self, label: str):
+        """Marcheaza inceputul unei operatiuni lungi. Cat timp exista una,
+        fereastra nu se poate inchide."""
+        self._busy_count += 1
+        self._busy_labels.append(label)
+
+    def _end_busy(self, label: str):
+        self._busy_count = max(0, self._busy_count - 1)
+        try:
+            self._busy_labels.remove(label)
+        except ValueError:
+            pass
+
+    def _on_close(self):
+        if self._busy_count > 0:
+            what = ", ".join(dict.fromkeys(self._busy_labels)) or "o operatiune"
+            show_warning(
+                self.root, APP_TITLE,
+                f"O operatiune e in curs ({what}).\n\n"
+                f"Asteapta sa se termine inainte sa inchizi aplicatia - altfel poti "
+                f"ramane cu o copiere pe jumatate si o baza Serato incompleta.")
+            return
+        if ask_yesno(self.root, APP_TITLE, "Esti sigur ca vrei sa inchizi Serato Migrator?"):
+            self.root.destroy()
 
     def _guard_serato_not_running(self) -> bool:
         """True = sigur sa continuam. Daca Serato DJ Pro ruleaza, arata un
@@ -950,6 +982,7 @@ class SeratoMigratorApp:
         self.set_status("Scanez bibliotecile Serato...")
         self.log("Scanez bibliotecile Serato (locala + volume externe montate)...")
         t0 = time.time()
+        self._begin_busy("scanare biblioteci")
 
         def work():
             libs = scanner.find_serato_libraries()
@@ -959,6 +992,7 @@ class SeratoMigratorApp:
         threading.Thread(target=work, daemon=True).start()
 
     def _on_libraries_scanned(self, libs: list[scanner.SeratoLibrary], elapsed: float):
+        self._end_busy("scanare biblioteci")
         self.libraries = libs
         for row in self.libs_tree.get_children():
             self.libs_tree.delete(row)
@@ -995,6 +1029,7 @@ class SeratoMigratorApp:
         self.check_missing_btn["state"] = "disabled"
         t0 = time.time()
         progress_q: queue.Queue = queue.Queue()
+        self._begin_busy("cautare track-uri lipsa")
 
         def progress_cb(count):
             progress_q.put(count)
@@ -1024,6 +1059,7 @@ class SeratoMigratorApp:
         self.root.after(400, lambda: self._poll_missing_progress(progress_q, t0))
 
     def _show_missing_results(self, lib: scanner.SeratoLibrary, found, still_missing, elapsed: float):
+        self._end_busy("cautare track-uri lipsa")
         self.check_missing_btn["state"] = "normal"
         self.set_status("Verificare terminata.")
         self.log(f"Verificare terminata in {elapsed:.1f}s pentru '{lib.name}': "
@@ -1205,6 +1241,7 @@ class SeratoMigratorApp:
         self.scan_orphans_btn["state"] = "disabled"
         t0 = time.time()
         progress_q: queue.Queue = queue.Queue()
+        self._begin_busy("scanare fisiere orfane")
 
         def progress_cb(scanned, orphans_so_far):
             progress_q.put((scanned, orphans_so_far))
@@ -1234,6 +1271,7 @@ class SeratoMigratorApp:
         self.root.after(400, lambda: self._poll_orphan_progress(progress_q))
 
     def _on_orphans_found(self, orphans: list[Path], elapsed: float):
+        self._end_busy("scanare fisiere orfane")
         self.scan_orphans_btn["state"] = "normal"
         self.orphans_list.delete(*self.orphans_list.get_children())
         total_bytes = 0
@@ -1685,21 +1723,25 @@ class SeratoMigratorApp:
         self.log(f"Incep copierea: {self._plan.primary_count} fisiere, {_human_size(self._plan.total_bytes)}.")
         plan = self._plan
         dest_root = Path(self.dest_var.get().strip())
+        self._begin_busy("migrare")
 
         def progress_cb(done, total, op: copier.CopyOperation):
             self._progress_queue.put((done, total, op))
 
         def work():
-            copier.execute_plan(plan, progress_callback=progress_cb)
-            if copy_serato:
-                self._progress_queue.put(("serato_start",))
-                dest_serato_dir = copier.copy_serato_folder(selected_libs[0], dest_root)
-                self._progress_queue.put(("serato_done",))
-                if rewrite_paths:
-                    self._progress_queue.put(("rewrite_start",))
-                    copier.rewrite_serato_database(selected_libs[0], plan, dest_serato_dir, dest_root)
-                    self._progress_queue.put(("rewrite_done",))
-            self._progress_queue.put(None)  # semnal de final
+            try:
+                copier.execute_plan(plan, progress_callback=progress_cb)
+                if copy_serato:
+                    self._progress_queue.put(("serato_start",))
+                    dest_serato_dir = copier.copy_serato_folder(selected_libs[0], dest_root)
+                    self._progress_queue.put(("serato_done",))
+                    if rewrite_paths:
+                        self._progress_queue.put(("rewrite_start",))
+                        copier.rewrite_serato_database(selected_libs[0], plan, dest_serato_dir, dest_root)
+                        self._progress_queue.put(("rewrite_done",))
+                self._progress_queue.put(None)  # semnal de final OK
+            except Exception as exc:  # noqa: BLE001 - raportam orice in UI
+                self._progress_queue.put(("error", repr(exc)))
 
         threading.Thread(target=work, daemon=True).start()
         self.root.after(100, self._poll_progress)
@@ -1709,9 +1751,17 @@ class SeratoMigratorApp:
             while True:
                 item = self._progress_queue.get_nowait()
                 if item is None:
+                    self._end_busy("migrare")
                     self.set_status("Copiere terminata.")
                     self.log("Copiere terminata.")
                     show_info(self.root, APP_TITLE, "Copierea s-a terminat.")
+                    self.copy_btn["state"] = "normal"
+                    return
+                if item[0] == "error":
+                    self._end_busy("migrare")
+                    self.set_status("Copiere esuata.")
+                    self.log(f"EROARE la copiere: {item[1]}")
+                    show_warning(self.root, APP_TITLE, f"Copierea a esuat:\n\n{item[1]}")
                     self.copy_btn["state"] = "normal"
                     return
                 if item[0] == "serato_start":
