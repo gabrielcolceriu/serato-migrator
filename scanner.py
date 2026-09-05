@@ -2,10 +2,24 @@
 construirea unui model unificat: librarii, crate-uri, track-uri, orfane."""
 from __future__ import annotations
 
+import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 
 import serato_db as sdb
+
+
+def is_serato_running() -> bool:
+    """True daca Serato DJ Pro ruleaza in acest moment. Scrierea directa pe
+    disk in _Serato_ cat timp Serato ruleaza e riscanta - Serato poate sa isi
+    salveze peste starea din memorie (veche) si sa anuleze schimbarea facuta
+    extern."""
+    try:
+        result = subprocess.run(["pgrep", "-f", "Serato DJ Pro"],
+                                 capture_output=True, timeout=3)
+        return result.returncode == 0
+    except Exception:
+        return False
 
 AUDIO_EXTENSIONS = {".mp3", ".wav", ".aiff", ".aif", ".flac", ".m4a", ".ogg", ".wma", ".alac"}
 
