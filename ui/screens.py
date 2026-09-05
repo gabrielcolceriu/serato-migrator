@@ -17,6 +17,8 @@ from AppKit import (
     NSTableView, NSTableColumn, NSButton, NSBezelStyleRounded, NSStackView,
     NSUserInterfaceLayoutOrientationVertical, NSTextView, NSOpenPanel,
     NSProgressIndicator, NSProgressIndicatorBarStyle, NSSearchField,
+    NSImageView, NSPopUpButton, NSAlert, NSAttributedString,
+    NSForegroundColorAttributeName, NSFontAttributeName,
 )
 from Foundation import NSObject, NSMakeRect, NSDate
 from PyObjCTools import AppHelper
@@ -57,6 +59,25 @@ def _button(title, target, action):
     b.setTarget_(target)
     b.setAction_(action)
     return b
+
+
+def _spacer(height):
+    v = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 1, height))
+    v.setTranslatesAutoresizingMaskIntoConstraints_(False)
+    from AppKit import NSLayoutConstraint
+    c = NSLayoutConstraint.constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant_(
+        v, 8, 0, None, 0, 1.0, float(height))  # attribute 8 = height
+    v.addConstraint_(c)
+    return v
+
+
+def _alert(message, *, informative=None, style=0):
+    a = NSAlert.alloc().init()
+    a.setMessageText_(message)
+    if informative:
+        a.setInformativeText_(informative)
+    a.setAlertStyle_(style)
+    a.runModal()
 
 
 class _Rows(NSObject):
@@ -148,13 +169,26 @@ class BaseScreen(NSViewController):
 
 
 # ------------------------------------------------------------------- Overview
+def _link(title, target, action):
+    b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 20))
+    b.setBordered_(False)
+    b.setButtonType_(7)  # momentary change
+    attrs = {NSForegroundColorAttributeName: NSColor.linkColor(),
+             NSFontAttributeName: NSFont.systemFontOfSize_(13)}
+    b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(title, attrs))
+    b.setTarget_(target)
+    b.setAction_(action)
+    b.setContentHuggingPriority_forOrientation_(251, 0)
+    return b
+
+
 class OverviewScreen(BaseScreen):
     def build_(self, v):
-        self._stack = NSStackView.alloc().initWithFrame_(v.bounds())
+        self._stack = NSStackView.alloc().initWithFrame_(NSMakeRect(0, 0, v.bounds().size.width, v.bounds().size.height))
         self._stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
         self._stack.setAlignment_(1)  # leading
-        self._stack.setSpacing_(8)
-        self._stack.setEdgeInsets_((24, 24, 24, 24))
+        self._stack.setSpacing_(10)
+        self._stack.setEdgeInsets_((46, 28, 28, 28))
         self._stack.setAutoresizingMask_(_AUTOSIZE)
         v.addSubview_(self._stack)
         self.render()
@@ -165,25 +199,127 @@ class OverviewScreen(BaseScreen):
     def librariesChanged(self):
         self.render()
 
+    def refresh(self):
+        self._app.rescanLibraries_(None)
+
     def render(self):
+        from . import health as _health
         for sub in list(self._stack.arrangedSubviews()):
             self._stack.removeArrangedSubview_(sub)
             sub.removeFromSuperview()
+        add = self._stack.addArrangedSubview_
+
         lib = self._app.activeLibrary()
         if lib is None:
-            self._stack.addArrangedSubview_(_label("Nu a fost detectată nicio bibliotecă Serato.", bold=True, size=17))
-            self._stack.addArrangedSubview_(_label("Conectează un volum cu un folder _Serato_ sau alege manual unul.", secondary=True))
-            self._stack.addArrangedSubview_(_button("Scanează din nou", self._app, b"rescanLibraries:"))
+            add(theme.make_label("Nu a fost detectată nicio bibliotecă Serato.", style="title2"))
+            add(theme.make_label("Conectează un volum cu un folder _Serato_ sau alege manual unul.",
+                                 style="secondary"))
+            add(_spacer(8))
+            add(_button("Alege bibliotecă…", self, b"chooseLibrary:"))
             return
-        present = len(lib.present_tracks)
-        missing = len(lib.missing_tracks)
-        health = "✓ Biblioteca este în regulă" if missing == 0 else f"⚠ {missing} fișiere lipsă"
-        self._stack.addArrangedSubview_(_label(lib.name, bold=True, size=22))
-        self._stack.addArrangedSubview_(_label(str(lib.volume_root), secondary=True))
-        self._stack.addArrangedSubview_(_label(health, bold=True, size=15))
-        self._stack.addArrangedSubview_(_label(
-            f"{theme.format_int(present)} track-uri     {theme.format_int(len(lib.crates))} crate-uri     {theme.format_int(missing)} lipsă"))
-        self._stack.addArrangedSubview_(_button("Scanează din nou", self._app, b"rescanLibraries:"))
+
+        libs = self._app.libraries()
+        if len(libs) > 1:
+            row = NSStackView.alloc().init()
+            row.setSpacing_(6)
+            row.addArrangedSubview_(theme.make_label("Bibliotecă activă:", style="secondary"))
+            pop = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 24))
+            pop.addItemsWithTitles_([l.name for l in libs])
+            try:
+                pop.selectItemAtIndex_([str(l.volume_root) for l in libs].index(str(lib.volume_root)))
+            except ValueError:
+                pass
+            pop.setTarget_(self)
+            pop.setAction_(b"switchLibrary:")
+            self._pop = pop
+            row.addArrangedSubview_(pop)
+            add(row)
+            add(_spacer(4))
+
+        add(theme.make_label(lib.name, style="largeTitle"))
+        add(theme.make_label(str(lib.volume_root), style="secondary"))
+        add(_spacer(6))
+
+        h = _health.library_health(lib, scanning=self._app.isBusy())
+        hrow = NSStackView.alloc().init()
+        hrow.setSpacing_(6)
+        sym = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 18, 18))
+        from .sidebar import _symbol
+        sym.setImage_(_symbol(h.symbol, point=15))
+        sym.setContentTintColor_(theme.ok_color() if h.key == "ok"
+                                 else theme.warn_color() if h.key in ("missing", "metadata")
+                                 else theme.secondary_label() if h.key == "scanning"
+                                 else theme.error_color())
+        hrow.addArrangedSubview_(sym)
+        hrow.addArrangedSubview_(theme.make_label(h.label, style="headline"))
+        if h.target:
+            hrow.addArrangedSubview_(_link("Vezi", self, b"goHealthTarget:"))
+            self._health_target = h.target
+        add(hrow)
+        add(_spacer(8))
+
+        stats = NSStackView.alloc().init()
+        stats.setSpacing_(28)
+        for value, name in ((len(lib.present_tracks), "track-uri"),
+                            (len(lib.crates), "crate-uri"),
+                            (len(lib.missing_tracks), "lipsă")):
+            col = NSStackView.alloc().init()
+            col.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+            col.setAlignment_(1)
+            col.setSpacing_(0)
+            col.addArrangedSubview_(theme.make_label(theme.format_int(value), style="title2"))
+            col.addArrangedSubview_(theme.make_label(name, style="caption"))
+            stats.addArrangedSubview_(col)
+        add(stats)
+        add(_spacer(6))
+
+        add(theme.make_label(f"Ultima scanare: {_health.last_scan_text(str(lib.volume_root))}",
+                             style="caption"))
+        add(_spacer(10))
+        add(_button("Scanează din nou", self._app, b"rescanLibraries:"))
+        add(_spacer(16))
+
+        add(theme.make_label("Acțiuni rapide", style="headline"))
+        add(_link("Migrează biblioteca", self, b"goMigrate:"))
+        add(_link("Verifică fișierele", self, b"goMissing:"))
+        add(_link("Analizează metadata", self, b"goMetadata:"))
+
+    # actions
+    def chooseLibrary_(self, sender):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseDirectories_(True)
+        panel.setCanChooseFiles_(False)
+        panel.setPrompt_("Alege")
+        panel.setMessage_("Alege folderul rădăcină al bibliotecii (conține _Serato_)")
+        if panel.runModal() == 1:
+            root = panel.URLs()[0].path()
+            lib = scanner.load_library_at(root)
+            if lib is None:
+                _alert("Nu am găsit un folder _Serato_ valid în:\n" + root)
+                return
+            self._app._libraries = list(self._app._libraries) + [lib]
+            self._app.setActiveLibraryRoot_(root)
+            self.render()
+
+    def switchLibrary_(self, sender):
+        libs = self._app.libraries()
+        idx = self._pop.indexOfSelectedItem()
+        if 0 <= idx < len(libs):
+            self._app.setActiveLibraryRoot_(str(libs[idx].volume_root))
+            self.render()
+
+    def goHealthTarget_(self, sender):
+        self._app.selectDestination_(getattr(self, "_health_target", "overview"))
+        self._app._wc.selectSidebarRowForDestination_(getattr(self, "_health_target", "overview"))
+
+    def goMigrate_(self, sender):
+        self._app.selectDestination_("migrate"); self._app._wc.selectSidebarRowForDestination_("migrate")
+
+    def goMissing_(self, sender):
+        self._app.selectDestination_("crates"); self._app._wc.selectSidebarRowForDestination_("crates")
+
+    def goMetadata_(self, sender):
+        self._app.selectDestination_("metadata"); self._app._wc.selectSidebarRowForDestination_("metadata")
 
 
 # ------------------------------------------------------------------- Libraries
