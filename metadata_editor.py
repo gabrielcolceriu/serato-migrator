@@ -78,11 +78,7 @@ def apply_database_edits(lib: SeratoLibrary, edits: dict[str, dict[str, str]]):
     raw_path din `edits` (ex: {"tsng": "Titlu nou", "tart": "Artist nou"})."""
     db_path = lib.serato_dir / "database V2"
     entries = serato_db.parse_tlv(db_path.read_bytes())
-
-    for field_tag in ("tsng", "tart", "talb", "tgen"):
-        field_map = {raw_path: fields[field_tag] for raw_path, fields in edits.items() if field_tag in fields}
-        if field_map:
-            entries = serato_db.rewrite_paths(entries, field_tag, field_map)
+    entries = serato_db.rewrite_track_fields(entries, "pfil", edits)
 
     db_path.write_bytes(serato_db.serialize_tlv(entries))
 
