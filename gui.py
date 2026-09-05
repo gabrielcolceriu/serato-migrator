@@ -581,6 +581,21 @@ class SeratoMigratorApp:
     def set_status(self, text: str):
         self.status_var.set(text)
 
+    def _guard_serato_not_running(self) -> bool:
+        """True = sigur sa continuam. Daca Serato DJ Pro ruleaza, arata un
+        avertisment si intoarce False - scrierea directa in _Serato_ cat timp
+        Serato ruleaza risca sa fie anulata cand Serato isi salveaza propria
+        stare (veche) din memorie peste fisier."""
+        if not scanner.is_serato_running():
+            return True
+        show_warning(
+            self.root, APP_TITLE,
+            "Serato DJ Pro ruleaza acum. Inchide-l complet (Cmd+Q) inainte de a continua -"
+            " altfel Serato poate sa isi salveze propria versiune (veche) peste schimbarea"
+            " facuta aici, anuland-o.")
+        self.log("Operatie blocata: Serato DJ Pro ruleaza. Inchide-l si incearca din nou.")
+        return False
+
     # ---------------------------------------------------------- Tab Jurnal
     def _build_tab_log(self):
         top = ttk.Frame(self.tab_log)
@@ -757,6 +772,8 @@ class SeratoMigratorApp:
         sel = self.metadata_tree.selection()
         if not sel or not self._metadata_lib:
             return
+        if not self._guard_serato_not_running():
+            return
         me = self._metadata_editor
         field_tags = {"artist": "tart", "title": "tsng", "album": "talb", "genre": "tgen"}
 
@@ -838,6 +855,8 @@ class SeratoMigratorApp:
             selected = tree.selection()
             if not selected:
                 show_info(self.root, APP_TITLE, "Nu ai selectat nimic.")
+                return
+            if not self._guard_serato_not_running():
                 return
             edits = {}
             for iid in selected:
@@ -1331,6 +1350,9 @@ class SeratoMigratorApp:
             return
 
         copy_serato = self.copy_serato_var.get()
+        if copy_serato and not self._guard_serato_not_running():
+            return
+
         selected_libs = self._selected_libraries()
         if copy_serato and len(selected_libs) != 1:
             show_warning(
