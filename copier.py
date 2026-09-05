@@ -280,6 +280,37 @@ def write_fresh_serato(
     )
 
 
+_DB_ESSENTIAL_FILES = ("database V2", "neworder.pref", "collapsed.pref")
+_DB_ESSENTIAL_DIRS = ("Subcrates", "SmartCrates", "Smart Crates")
+
+
+def export_database(library: SeratoLibrary, dest_zip: Path) -> int:
+    """Salveaza baza de date a bibliotecii (database V2 + crate-uri + pref-uri de
+    ordonare) intr-un .zip la `dest_zip`. Returneaza numarul de intrari scrise.
+    Nu include Metadata/ (waveform-uri regenerabile) sau database V2.backup."""
+    import zipfile
+
+    serato_dir = Path(library.serato_dir)
+    dest_zip = Path(dest_zip)
+    dest_zip.parent.mkdir(parents=True, exist_ok=True)
+    n = 0
+    with zipfile.ZipFile(dest_zip, "w", zipfile.ZIP_DEFLATED) as zf:
+        for name in _DB_ESSENTIAL_FILES:
+            f = serato_dir / name
+            if f.is_file():
+                zf.write(f, f"_Serato_/{name}")
+                n += 1
+        for folder in _DB_ESSENTIAL_DIRS:
+            d = serato_dir / folder
+            if not d.is_dir():
+                continue
+            for f in sorted(d.rglob("*")):
+                if f.is_file():
+                    zf.write(f, f"_Serato_/{folder}/{f.relative_to(d).as_posix()}")
+                    n += 1
+    return n
+
+
 @dataclass
 class RebuildResult:
     backup_dir: Path
@@ -303,9 +334,20 @@ def rebuild_database_from_disk(
     serato_dir = Path(library.serato_dir)
     vol = Path(library.volume_root)
 
+    # backup DOAR fisierele esentiale ale bibliotecii (nu si Metadata/ cu
+    # waveform-urile regenerabile, nici Export Backups/ - alea faceau backup-uri
+    # de sute de MB fiecare).
     stamp = time.strftime("%Y-%m-%d_%H%M%S")
     backup_dir = serato_dir.with_name(f"_Serato_ (backup {stamp})")
-    shutil.copytree(serato_dir, backup_dir)
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    for name in _DB_ESSENTIAL_FILES:   # fara database V2.backup (auto Serato, uneori sute de MB)
+        src = serato_dir / name
+        if src.is_file():
+            shutil.copy2(src, backup_dir / name)
+    for folder in _DB_ESSENTIAL_DIRS:
+        src = serato_dir / folder
+        if src.is_dir():
+            shutil.copytree(src, backup_dir / folder)
 
     db_path = serato_dir / "database V2"
     vrsn_value, src_idx = (None, {})
