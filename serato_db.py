@@ -88,6 +88,38 @@ def rewrite_paths(entries: list[tuple[str, object]], field_tag: str,
     return new_entries
 
 
+def rewrite_track_fields(entries: list[tuple[str, object]], path_field: str,
+                          edits_by_path: dict[str, dict[str, object]]) -> list[tuple[str, object]]:
+    """Pentru fiecare otrk identificat dupa `path_field` (ex: 'pfil'), suprascrie
+    campurile date in edits_by_path[cale] (ex: {'tsng': 'Titlu nou'}), adaugand
+    tag-ul daca lipsea complet. Spre deosebire de rewrite_paths, identificarea
+    se face dupa calea track-ului, nu dupa vechea valoare a campului - necesar
+    pentru campuri ne-unice ca artist/titlu (multe track-uri au aceeasi valoare,
+    adesea goala)."""
+    new_entries = []
+    for tag, value in entries:
+        if tag != "otrk":
+            new_entries.append((tag, value))
+            continue
+        path = next((v2 for t2, v2 in value if t2 == path_field), None)
+        fields = edits_by_path.get(path) if path else None
+        if not fields:
+            new_entries.append((tag, value))
+            continue
+
+        new_value = []
+        remaining = dict(fields)
+        for t2, v2 in value:
+            if t2 in remaining:
+                new_value.append((t2, remaining.pop(t2)))
+            else:
+                new_value.append((t2, v2))
+        for t2, v2 in remaining.items():   # campuri care nu existau deloc in track
+            new_value.append((t2, v2))
+        new_entries.append((tag, new_value))
+    return new_entries
+
+
 def _get(entries: list[tuple[str, object]], tag: str):
     for t, v in entries:
         if t == tag:
