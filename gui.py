@@ -89,17 +89,24 @@ def _draw_logo_bars_on_canvas(canvas: Canvas, cx: int, cy: int, box: int):
 
 
 def _build_app_icon(size: int = 128) -> PhotoImage:
-    """Deseneaza programatic o iconita moderna (patrat rotunjit, degrade + bare) - fara logo extern."""
+    """Deseneaza programatic o iconita moderna (patrat rotunjit, degrade + bare).
+
+    macOS asteapta ca desenul sa ocupe ~80% din panza, cu margine transparenta -
+    altfel iconita apare mai mare decat celelalte in Dock. Desenam intr-un patrat
+    interior (`box`) centrat, cu restul transparent.
+    """
     img = PhotoImage(width=size, height=size)
-    radius = size * 0.22
+    margin = round(size * 0.10)          # ~10% margine de fiecare parte -> desen la 80%
+    box = size - 2 * margin
+    radius = box * 0.22
 
     n = len(LOGO_BAR_HEIGHTS)
-    bar_w = size * 0.11
-    gap = size * 0.055
+    bar_w = box * 0.11
+    gap = box * 0.055
     total_w = n * bar_w + (n - 1) * gap
-    start_x = (size - total_w) / 2
-    max_bar_h = size * 0.46
-    base_y = size * 0.72
+    start_x = margin + (box - total_w) / 2
+    max_bar_h = box * 0.46
+    base_y = margin + box * 0.72
 
     bars = []
     for i, frac in enumerate(LOGO_BAR_HEIGHTS):
@@ -113,13 +120,14 @@ def _build_app_icon(size: int = 128) -> PhotoImage:
     for y in range(size):
         colors = []
         for x in range(size):
-            xf, yf = x + 0.5, y + 0.5
-            if not _inside_rounded_square(xf, yf, size, radius):
+            # coordonate relative la patratul interior
+            xf, yf = x + 0.5 - margin, y + 0.5 - margin
+            if not _inside_rounded_square(xf, yf, box, radius):
                 colors.append(SPLASH_BG)
                 transparent_px.append((x, y))
                 continue
-            t = (x + y) / (2 * size)
-            bg = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, t)
+            t = ((x - margin) + (y - margin)) / (2 * box)
+            bg = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, max(0.0, min(1.0, t)))
             in_bar = any(x0 <= x < x1 and y0 <= y <= y1 for x0, x1, y0, y1 in bars)
             colors.append("#ffffff" if in_bar else bg)
         rows.append("{" + " ".join(colors) + "}")
@@ -312,6 +320,48 @@ def _build_database_icon(size: int = 28) -> PhotoImage:
             elif y >= bot_y - ry and on_ellipse(x, y, bot_y) and y >= bot_y:
                 px[y][x] = col
 
+    _flush_image(img, px)
+    return img
+
+
+def _build_export_icon(size: int = 28) -> PhotoImage:
+    """Cutie deschisa (tava) cu sageata in jos care intra in ea - export catre fisier."""
+    img, px = _new_blank_image(size)
+    th = max(1.6, size * 0.09)
+    # tava: U inversat (fara latura de sus)
+    left = size * 0.22
+    right = size * 0.78
+    tray_top = size * 0.55
+    tray_bot = size * 0.80
+
+    def seg(x0, y0, x1, y1):
+        for y in range(size):
+            for x in range(size):
+                if _dist_to_segment(x + 0.5, y + 0.5, x0, y0, x1, y1) < th / 2:
+                    d = ((x - size / 2) ** 2 + (y - size / 2) ** 2) ** 0.5
+                    px[y][x] = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END,
+                                          max(0.0, min(1.0, d / (size * 0.6))))
+
+    seg(left, tray_top, left, tray_bot)
+    seg(right, tray_top, right, tray_bot)
+    seg(left, tray_bot, right, tray_bot)
+
+    # sageata verticala in jos
+    cx = size / 2
+    a_top = size * 0.16
+    a_tip = size * 0.52
+    seg(cx, a_top, cx, a_tip)
+    head_w = size * 0.16
+    head_h = size * 0.16
+    p1 = (cx, a_tip + head_h * 0.15)
+    p2 = (cx - head_w, a_tip - head_h)
+    p3 = (cx + head_w, a_tip - head_h)
+    for y in range(size):
+        for x in range(size):
+            if _point_in_triangle(x + 0.5, y + 0.5, *p1, *p2, *p3):
+                d = ((x - size / 2) ** 2 + (y - size / 2) ** 2) ** 0.5
+                px[y][x] = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END,
+                                      max(0.0, min(1.0, d / (size * 0.6))))
     _flush_image(img, px)
     return img
 
@@ -994,6 +1044,7 @@ class SeratoMigratorApp:
         self._icon_refresh = _build_refresh_icon()
         self._icon_check = _build_locate_icon()
         self._icon_rebuild = _build_database_icon()
+        self._icon_export = _build_export_icon()
 
         refresh_btn = ttk.Button(top, image=self._icon_refresh, style="Icon.TButton",
                                   command=self.refresh_libraries)
@@ -1013,9 +1064,9 @@ class SeratoMigratorApp:
                  "pastrand DOAR track-urile care exista fizic pe acel volum "
                  "(cele efectiv puse pe disc). Face intai backup la _Serato_.")
 
-        self.export_db_btn = ttk.Button(top, text="Exporta baza de date",
+        self.export_db_btn = ttk.Button(top, image=self._icon_export, style="Icon.TButton",
                                          command=self._export_database)
-        self.export_db_btn.pack(side="left", padx=(12, 2))
+        self.export_db_btn.pack(side="left", padx=2)
         _Tooltip(self.export_db_btn,
                  "Salveaza baza de date a bibliotecii selectate (database V2 + "
                  "crate-uri + pref-uri) intr-un .zip. Fara waveform-uri.")
