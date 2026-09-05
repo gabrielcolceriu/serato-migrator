@@ -64,7 +64,13 @@ class ContentRouter(NSObject):
         self._delegate = delegate
         self._vcs = {}
         self._current = None
+        self._inspector_container = None
+        self._wc = None
         return self
+
+    def setInspectorContainer_windowController_(self, inspector, wc):
+        self._inspector_container = inspector
+        self._wc = wc
 
     def show_(self, dest_id):
         if dest_id == self._current:
@@ -80,8 +86,28 @@ class ContentRouter(NSObject):
         view.setAutoresizingMask_((1 << 1) | (1 << 4))  # width | height
         self._container.addSubview_(view)
         self._current = dest_id
+        self._updateInspectorFor_(vc)
         if hasattr(vc, "didBecomeVisible"):
             vc.didBecomeVisible()
+
+    @objc.python_method
+    def _updateInspectorFor_(self, vc):
+        if self._inspector_container is None:
+            return
+        for v in list(self._inspector_container.subviews()):
+            v.removeFromSuperview()
+        insp = vc.inspectorView() if hasattr(vc, "inspectorView") else None
+        if insp is not None:
+            insp.setFrame_(self._inspector_container.bounds())
+            insp.setAutoresizingMask_((1 << 1) | (1 << 4))
+            self._inspector_container.addSubview_(insp)
+        if self._wc is not None:
+            self._wc.setInspectorAvailable_(insp is not None)
+
+    def refreshInspector(self):
+        vc = self._vcs.get(self._current)
+        if vc is not None:
+            self._updateInspectorFor_(vc)
 
     @objc.python_method
     def _make(self, dest_id):
@@ -138,31 +164,78 @@ class MainWindowController(NSWindowController):
         sb_scroll = self._sidebar_ctl.view()
 
         # content container
-        container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 900, 600))
+        container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 700, 600))
         self._content_container = container
+
+        # inspector container (3rd pane; shown only when a screen provides content)
+        inspector = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 260, 600))
+        self._inspector_container = inspector
+        self._inspector_width = 280
+        self._inspector_collapsed = True
+
         self._router = ContentRouter.alloc().initWithContainer_appDelegate_(
             container, self._delegate)
+        self._router.setInspectorContainer_windowController_(inspector, self)
         self._delegate.setRouter_(self._router)
 
         split.setDelegate_(self)
         split.addSubview_(sb_scroll)
         split.addSubview_(container)
+        split.addSubview_(inspector)
         split.setPosition_ofDividerAtIndex_(224, 0)
+        split.setPosition_ofDividerAtIndex_(split.bounds().size.width, 1)  # inspector collapsed
         win.setContentView_(split)
 
-    # --- NSSplitViewDelegate: let the sidebar collapse fully & clamp its width
+    # --- inspector show/hide (driven by the router per screen) ---
+    def setInspectorVisible_(self, visible):
+        visible = bool(visible)
+        w = self._split.bounds().size.width
+        if visible:
+            self._split.setPosition_ofDividerAtIndex_(
+                w - float(getattr(self, "_inspector_width", 280) or 280), 1)
+        else:
+            cur = self._inspector_container.frame().size.width
+            if cur > 1:
+                self._inspector_width = cur
+            self._split.setPosition_ofDividerAtIndex_(w, 1)
+        self._inspector_collapsed = not visible
+        state.set(state.K_INSPECTOR_COLLAPSED, not visible)
+
+    def toggleInspector_(self, sender):
+        # only meaningful when the current screen has an inspector
+        if getattr(self, "_inspector_available", False):
+            self.setInspectorVisible_(self._inspector_collapsed)
+
+    def setInspectorAvailable_(self, available):
+        self._inspector_available = bool(available)
+        if not available:
+            self.setInspectorVisible_(False)
+        elif not state.get_bool(state.K_INSPECTOR_COLLAPSED):
+            self.setInspectorVisible_(True)
+
+    # --- NSSplitViewDelegate: sidebar + inspector collapse & fixed widths
     def splitView_canCollapseSubview_(self, sv, subview):
-        return subview is sv.subviews()[0]
+        subs = sv.subviews()
+        return subview is subs[0] or (len(subs) > 2 and subview is subs[2])
 
     def splitView_constrainMinCoordinate_ofSubviewAt_(self, sv, proposed, idx):
-        return 0.0
+        if idx == 0:
+            return 0.0
+        return max(proposed, sv.bounds().size.width * 0.35)  # content keeps room
 
     def splitView_constrainMaxCoordinate_ofSubviewAt_(self, sv, proposed, idx):
-        return 320.0
+        if idx == 0:
+            return 320.0
+        return sv.bounds().size.width  # inspector divider can go fully right
 
     def splitView_shouldAdjustSizeOfSubview_(self, sv, subview):
-        # keep the sidebar fixed-width on window resize; only the content grows
-        return subview is not sv.subviews()[0]
+        subs = sv.subviews()
+        # only the content pane grows on window resize
+        if subview is subs[0]:
+            return False
+        if len(subs) > 2 and subview is subs[2]:
+            return False
+        return True
 
     def _buildToolbar(self):
         tb = NSToolbar.alloc().initWithIdentifier_("main.toolbar")
@@ -351,6 +424,10 @@ class AppDelegate(NSObject):
         if self._wc is not None:
             self._wc.toggleSidebar_(sender)
 
+    def toggleInspector_(self, sender):
+        if self._wc is not None:
+            self._wc.toggleInspector_(sender)
+
     # --- toolbar generic ---
     def refreshCurrent_(self, sender):
         dest = self.currentDestination()
@@ -444,6 +521,10 @@ class AppDelegate(NSObject):
             "Ascunde/Arată bara laterală", b"toggleSidebar:", "s")
         mi.setKeyEquivalentModifierMask_((1 << 20) | (1 << 19))  # cmd | alt
         mi.setTarget_(self)
+        mi2 = view_menu.addItemWithTitle_action_keyEquivalent_(
+            "Ascunde/Arată inspectorul", b"toggleInspector:", "i")
+        mi2.setKeyEquivalentModifierMask_((1 << 20) | (1 << 19))
+        mi2.setTarget_(self)
 
         # Fereastră
         win_item = NSMenuItem.alloc().init()
