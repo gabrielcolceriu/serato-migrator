@@ -30,10 +30,23 @@ _AUTOSIZE = (1 << 1) | (1 << 4)  # width | height
 
 
 def _label(text, *, bold=False, secondary=False, size=13):
-    tf = NSTextField.labelWithString_(text or "")
-    tf.setFont_(NSFont.boldSystemFontOfSize_(size) if bold else NSFont.systemFontOfSize_(size))
-    if secondary:
-        tf.setTextColor_(NSColor.secondaryLabelColor())
+    """Thin bridge to the design-system label. `size` still accepted for the
+    few call sites that pass an explicit point size; otherwise a text style is
+    inferred so light/dark + Dynamic-Type-ish scaling come for free."""
+    if size >= 22:
+        style = "largeTitle"
+    elif size >= 17:
+        style = "title2"
+    elif size >= 15:
+        style = "headline"
+    elif secondary or size <= 11:
+        style = "caption" if size <= 11 else "secondary"
+    else:
+        style = "body"
+    tf = theme.make_label(text, style=style,
+                          color=NSColor.secondaryLabelColor() if secondary else None)
+    if bold and style in ("body", "secondary", "caption"):
+        tf.setFont_(NSFont.systemFontOfSize_weight_(size, 0.4))  # semibold-ish
     return tf
 
 
