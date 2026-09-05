@@ -91,12 +91,18 @@ class SidebarController(NSObject):
     # ---- build ----
     @objc.python_method
     def _buildView(self):
+        from AppKit import NSWorkspace
         container = NSVisualEffectView.alloc().initWithFrame_(NSMakeRect(0, 0, 224, 600))
         container.setBlendingMode_(NSVisualEffectBlendingModeBehindWindow)
         container.setMaterial_(NSVisualEffectMaterialSidebar)
         container.setState_(NSVisualEffectStateActive)
         container.setAutoresizingMask_((1 << 1) | (1 << 4))
         self._container = container
+        self._applyTransparencyPreference_()
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"accessibilityChanged:",
+            "NSWorkspaceAccessibilityDisplayOptionsDidChangeNotification",
+            NSWorkspace.sharedWorkspace())
 
         # outline
         ov = NSOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, 224, 500))
@@ -216,6 +222,21 @@ class SidebarController(NSObject):
     def footerClicked_(self, gr):
         self.selectDestination("overview")
         self._app.selectDestination_("overview")
+
+    def accessibilityChanged_(self, note):
+        self._applyTransparencyPreference_()
+
+    @objc.python_method
+    def _applyTransparencyPreference_(self):
+        from AppKit import NSWorkspace
+        reduce = NSWorkspace.sharedWorkspace().accessibilityDisplayShouldReduceTransparency()
+        # NSVisualEffectView auto-falls-back to a solid fill under Reduce
+        # Transparency, but make the intent explicit and give it a matching bg.
+        self._container.setState_(1 if reduce else 2)  # inactive vs active
+        if reduce:
+            self._container.setMaterial_(3)  # NSVisualEffectMaterialWindowBackground
+        else:
+            self._container.setMaterial_(NSVisualEffectMaterialSidebar)
 
 
 def _lbl(text, *, size=13, bold=False, secondary=False):
