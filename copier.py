@@ -284,6 +284,58 @@ _DB_ESSENTIAL_FILES = ("database V2", "neworder.pref", "collapsed.pref")
 _DB_ESSENTIAL_DIRS = ("Subcrates", "SmartCrates", "Smart Crates")
 
 
+def add_orphans_to_crate(
+    library: SeratoLibrary, orphan_abs_paths, crate_name: str = "Orfane"
+) -> tuple[int, int]:
+    """Adauga fisierele orfane (cai absolute pe volumul bibliotecii) intr-un crate
+    `crate_name` si in `database V2`, ca Serato sa le vada. Backup la database V2
+    intai. Returneaza (adaugate in crate, adaugate in baza)."""
+    serato_dir = Path(library.serato_dir)
+    vol = Path(library.volume_root)
+
+    rels: list[str] = []
+    for p in orphan_abs_paths:
+        p = Path(p)
+        try:
+            rels.append(p.relative_to(vol).as_posix())
+        except ValueError:
+            continue  # nu e pe volumul bibliotecii
+
+    subcrates = serato_dir / "Subcrates"
+    subcrates.mkdir(parents=True, exist_ok=True)
+    crate_path = subcrates / f"{crate_name}.crate"
+
+    existing_bytes = crate_path.read_bytes() if crate_path.is_file() else None
+    existing = serato_db.parse_crate(crate_path) if existing_bytes else []
+    seen = set(existing)
+    merged = list(existing)
+    added_crate = 0
+    for r in rels:
+        if r not in seen:
+            merged.append(r)
+            seen.add(r)
+            added_crate += 1
+    crate_path.write_bytes(serato_db.build_crate(merged, source_crate_bytes=existing_bytes))
+
+    db_path = serato_dir / "database V2"
+    added_db = 0
+    if db_path.is_file():
+        stamp = time.strftime("%Y-%m-%d_%H%M%S")
+        shutil.copy2(db_path, db_path.with_name(f"database V2 (orfane backup {stamp})"))
+        vrsn, idx = serato_db.index_otrk_by_path(db_path.read_bytes())
+        otrk_list = list(idx.values())
+        for r in rels:
+            if r not in idx:
+                ext = Path(r).suffix.lower().lstrip(".")
+                otrk_list.append(serato_db.minimal_otrk(r, ext or None))
+                idx[r] = True
+                added_db += 1
+        if added_db:
+            db_path.write_bytes(serato_db.build_database(otrk_list, vrsn))
+
+    return added_crate, added_db
+
+
 def export_database(library: SeratoLibrary, dest_zip: Path) -> int:
     """Salveaza baza de date a bibliotecii (database V2 + crate-uri + pref-uri de
     ordonare) intr-un .zip la `dest_zip`. Returneaza numarul de intrari scrise.
