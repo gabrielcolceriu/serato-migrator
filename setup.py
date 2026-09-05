@@ -14,7 +14,7 @@ OPTIONS = {
         "CFBundleDisplayName": "Serato Migrator",
         "CFBundleIdentifier": "com.gabrielcolceriu.seratomigrator",
         "CFBundleShortVersionString": "0.1.0",
-        "NSHumanReadableCopyright": "Neoficial, nu este afiliat cu Serato Audio Research.",
+        "NSHumanReadableCopyright": "© Gabriel Colceriu",
     },
 }
 

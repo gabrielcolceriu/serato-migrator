@@ -1,14 +1,11 @@
 # Serato Migrator
 
-Unealta neoficiala pentru administrarea unei biblioteci Serato DJ Pro: gaseste
+Unealta personala pentru administrarea unei biblioteci Serato DJ Pro: gaseste
 bibliotecile Serato de pe disk (locala sau pe volume externe), verifica ce
 track-uri exista efectiv pe disk, gaseste fisiere orfane, si copiaza/reorganizeaza
 track-urile pe un disk nou (in foldere numite dupa crate-uri), inclusiv baza de
 date Serato, astfel incat noua locatie sa fie utilizabila fara "Locate Missing
 Files" manual.
-
-Nu este afiliata cu Serato Audio Research. "Serato" este marca inregistrata a
-detinatorilor ei.
 
 ## Ce face
 

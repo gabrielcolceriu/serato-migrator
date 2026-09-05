@@ -16,6 +16,7 @@ import scanner
 import copier
 
 APP_TITLE = "Serato Migrator"
+APP_VERSION = "0.1.0"
 
 BASE_FONT_SIZE = 14
 MONO_FONT_SIZE = 13
@@ -558,8 +559,13 @@ class SeratoMigratorApp:
         frame = ttk.Frame(outer, padding=30)
         frame.place(relx=0.5, rely=0.5, anchor="center")
 
+        self._about_logo_img = _build_app_icon(96)
+        ttk.Label(frame, image=self._about_logo_img).pack(pady=(0, 10))
+
         ttk.Label(frame, text="Serato Migrator", font=(None, 22, "bold"),
-                  justify="center", anchor="center").pack(pady=(0, 4))
+                  justify="center", anchor="center").pack(pady=(0, 2))
+        ttk.Label(frame, text=f"Versiune {APP_VERSION}", font=(None, BASE_FONT_SIZE - 1),
+                  foreground=TEXT_MUTED, justify="center", anchor="center").pack(pady=(0, 12))
         ttk.Label(frame, text="Unealta personala pentru administrarea bibliotecii Serato DJ Pro.",
                   font=(None, BASE_FONT_SIZE), justify="center", anchor="center").pack(pady=(0, 16))
 
@@ -573,9 +579,6 @@ class SeratoMigratorApp:
             "Migrare / Reorganizare: copiaza track-urile in foldere numite dupa crate-uri,"
             " pe o destinatie noua, fara sa stearga originalele",
             "Jurnal: istoricul tuturor operatiilor facute de aplicatie",
-            "",
-            "Acest program este neoficial si nu este afiliat cu Serato Audio Research.",
-            "'Serato' este marca inregistrata a detinatorilor ei.",
         ]
         for line in info_lines:
             ttk.Label(frame, text=line, font=(None, BASE_FONT_SIZE - 1),
