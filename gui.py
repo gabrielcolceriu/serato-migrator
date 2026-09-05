@@ -279,6 +279,43 @@ def _build_locate_icon(size: int = 28) -> PhotoImage:
     return img
 
 
+def _build_database_icon(size: int = 28) -> PhotoImage:
+    """Cilindru de baza de date (3 elipse) - degrade ca la logo. Folosit pentru
+    'Reconstruieste baza de date'."""
+    img, px = _new_blank_image(size)
+    cx = size / 2
+    rx = size * 0.30           # raza orizontala a elipsei
+    ry = size * 0.10           # raza verticala a elipsei
+    top_y = size * 0.24
+    bot_y = size * 0.76
+    thickness = max(1.4, size * 0.085)
+
+    def on_ellipse(x, y, ey):
+        nx = (x - cx + 0.5) / rx
+        nyv = (y - ey + 0.5) / ry
+        return abs((nx * nx + nyv * nyv) ** 0.5 - 1.0) < thickness / (2 * ry)
+
+    for y in range(size):
+        for x in range(size):
+            dxn = abs(x - cx + 0.5)
+            t = max(0.0, min(1.0, (y - top_y) / (bot_y - top_y)))
+            col = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, t)
+            # pereti laterali
+            if abs(dxn - rx) < thickness / 2 and top_y <= y <= bot_y:
+                px[y][x] = col
+            # elipsa de sus (plina in partea de sus)
+            elif on_ellipse(x, y, top_y):
+                px[y][x] = col
+            # elipsa de mijloc si de jos (doar jumatatea din fata)
+            elif y > (top_y + bot_y) / 2 - 1 and on_ellipse(x, y, (top_y + bot_y) / 2) and y >= (top_y + bot_y) / 2:
+                px[y][x] = col
+            elif y >= bot_y - ry and on_ellipse(x, y, bot_y) and y >= bot_y:
+                px[y][x] = col
+
+    _flush_image(img, px)
+    return img
+
+
 def _build_dot_icon(size: int = 13, filled: bool = False, color: str = TEXT_MUTED) -> PhotoImage:
     """Punct folosit ca indicator de expand/collapse in arbori, in loc de sageata clasica."""
     img, px = _new_blank_image(size)
@@ -955,6 +992,7 @@ class SeratoMigratorApp:
 
         self._icon_refresh = _build_refresh_icon()
         self._icon_check = _build_locate_icon()
+        self._icon_rebuild = _build_database_icon()
 
         refresh_btn = ttk.Button(top, image=self._icon_refresh, style="Icon.TButton",
                                   command=self.refresh_libraries)
@@ -966,9 +1004,9 @@ class SeratoMigratorApp:
         self.check_missing_btn.pack(side="left", padx=2)
         _Tooltip(self.check_missing_btn, "Verifica track-uri lipsa (cauta pe disk daca au fost mutate)")
 
-        self.rebuild_db_btn = ttk.Button(top, text="Reconstruieste baza de date",
+        self.rebuild_db_btn = ttk.Button(top, image=self._icon_rebuild, style="Icon.TButton",
                                           command=self._rebuild_database)
-        self.rebuild_db_btn.pack(side="left", padx=(12, 2))
+        self.rebuild_db_btn.pack(side="left", padx=2)
         _Tooltip(self.rebuild_db_btn,
                  "Genereaza o baza de date noua pentru biblioteca selectata, "
                  "pastrand DOAR track-urile care exista fizic pe acel volum "
