@@ -162,6 +162,8 @@ class MainWindowController(NSWindowController):
         if self is None:
             return None
         self._delegate = delegate
+        self._sidebar_collapsed = False
+        self._sidebar_width = 224
         self._buildContent()
         self._buildToolbar()
 
@@ -170,6 +172,8 @@ class MainWindowController(NSWindowController):
         else:
             win.center()
         win.setDelegate_(self)
+        if state.get_bool(state.K_SIDEBAR_COLLAPSED):
+            self._setSidebarCollapsed_(True)
         return self
 
     # --- layout ---
@@ -213,10 +217,25 @@ class MainWindowController(NSWindowController):
             container, self._delegate)
         self._delegate.setRouter_(self._router)
 
+        split.setDelegate_(self)
         split.addSubview_(sb_scroll)
         split.addSubview_(container)
         split.setPosition_ofDividerAtIndex_(224, 0)
         win.setContentView_(split)
+
+    # --- NSSplitViewDelegate: let the sidebar collapse fully & clamp its width
+    def splitView_canCollapseSubview_(self, sv, subview):
+        return subview is sv.subviews()[0]
+
+    def splitView_constrainMinCoordinate_ofSubviewAt_(self, sv, proposed, idx):
+        return 0.0
+
+    def splitView_constrainMaxCoordinate_ofSubviewAt_(self, sv, proposed, idx):
+        return 320.0
+
+    def splitView_shouldAdjustSizeOfSubview_(self, sv, subview):
+        # keep the sidebar fixed-width on window resize; only the content grows
+        return subview is not sv.subviews()[0]
 
     def _buildToolbar(self):
         tb = NSToolbar.alloc().initWithIdentifier_("main.toolbar")
@@ -261,14 +280,25 @@ class MainWindowController(NSWindowController):
             self._title_label.setStringValue_(text)
 
     def toggleSidebar_(self, sender):
-        collapsed = not self._split.isSubviewCollapsed_(self._split.subviews()[0])
-        # NSSplitView has no direct collapse toggle pre-VC; move the divider
+        # NSSplitView (pre-VC) has no built-in collapse toggle; track our own
+        # state and move the divider. isSubviewCollapsed_ does not update when
+        # you only set the divider position, so we must not rely on it.
+        self._setSidebarCollapsed_(not getattr(self, "_sidebar_collapsed", False))
+
+    def _setSidebarCollapsed_(self, collapsed):
+        collapsed = bool(collapsed)
+        cur = self._split.subviews()[0].frame().size.width
+        if not collapsed and cur > 1:
+            return  # already open
         if collapsed:
-            self._prev_pos = self._split.subviews()[0].frame().size.width or 224
+            if cur > 1:
+                self._sidebar_width = cur
             self._split.setPosition_ofDividerAtIndex_(0.0, 0)
         else:
-            self._split.setPosition_ofDividerAtIndex_(getattr(self, "_prev_pos", 224), 0)
-        state.set(state.K_SIDEBAR_COLLAPSED, bool(collapsed))
+            self._split.setPosition_ofDividerAtIndex_(
+                float(getattr(self, "_sidebar_width", 224) or 224), 0)
+        self._sidebar_collapsed = collapsed
+        state.set(state.K_SIDEBAR_COLLAPSED, collapsed)
 
     def selectSidebarRowForDestination_(self, dest_id):
         for row, (i, *_rest) in enumerate(NAV):
