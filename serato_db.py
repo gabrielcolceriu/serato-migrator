@@ -127,6 +127,75 @@ def _get(entries: list[tuple[str, object]], tag: str):
     return None
 
 
+# ------------------------------------------------------------------ constructie
+# String-urile de versiune (stocate UTF-16BE brut in campul `vrsn`).
+DB_VERSION = "2.0/Serato Scratch LIVE Database"
+CRATE_VERSION = "1.0/Serato ScratchLive Crate"
+
+
+def index_otrk_by_path(db_bytes: bytes, path_field: str = "pfil") -> tuple[bytes, dict[str, list]]:
+    """Dintr-o `database V2`, returneaza (valoarea bruta a campului vrsn,
+    {cale -> lista de campuri a acelui otrk}). Folosit ca sa clonam otrk-urile
+    complete (cu tot cu BPM, key, bitrate, comentarii) intr-o baza noua."""
+    entries = parse_tlv(db_bytes)
+    vrsn = b""
+    idx: dict[str, list] = {}
+    for tag, value in entries:
+        if tag == "vrsn":
+            vrsn = value
+        elif tag == "otrk":
+            key = _get(value, path_field)
+            if key:
+                idx[key] = value
+    return vrsn, idx
+
+
+def otrk_with_path(otrk_fields: list, new_path: str, path_field: str = "pfil") -> list:
+    """Copie a listei de campuri a unui otrk cu `path_field` inlocuit de `new_path`."""
+    out = []
+    replaced = False
+    for t, v in otrk_fields:
+        if t == path_field:
+            out.append((t, new_path))
+            replaced = True
+        else:
+            out.append((t, v))
+    if not replaced:
+        out.append((path_field, new_path))
+    return out
+
+
+def minimal_otrk(new_path: str, file_type: str | None = None) -> list:
+    """otrk minimal pentru un track fara intrare in baza sursa - Serato
+    completeaza restul metadatelor la prima scanare."""
+    fields: list = []
+    if file_type:
+        fields.append(("ttyp", file_type))
+    fields.append(("pfil", new_path))
+    return fields
+
+
+def build_database(otrk_list: list[list], vrsn_value: bytes | None = None) -> bytes:
+    """Serializeaza o `database V2` noua: campul vrsn + cate un `otrk` per track."""
+    entries: list = [("vrsn", vrsn_value or DB_VERSION.encode("utf-16-be"))]
+    for fields in otrk_list:
+        entries.append(("otrk", fields))
+    return serialize_tlv(entries)
+
+
+def build_crate(track_paths: list[str], source_crate_bytes: bytes | None = None) -> bytes:
+    """Serializeaza un `.crate` nou. Daca `source_crate_bytes` e dat, pastreaza
+    antetul original (vrsn, coloane `ovct`, sortare `osrt`) si inlocuieste doar
+    lista de track-uri; altfel scrie un antet minimal."""
+    if source_crate_bytes:
+        entries = [e for e in parse_tlv(source_crate_bytes) if e[0] != "otrk"]
+    else:
+        entries = [("vrsn", CRATE_VERSION.encode("utf-16-be"))]
+    for p in track_paths:
+        entries.append(("otrk", [("ptrk", p)]))
+    return serialize_tlv(entries)
+
+
 @dataclass
 class Track:
     abs_path: str          # cale absoluta reala pe disk (macOS), ex: /Volumes/PortableSSD/...
