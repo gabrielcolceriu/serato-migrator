@@ -740,6 +740,7 @@ class SeratoMigratorApp:
             self.metadata_tree.heading(c, text=c.capitalize())
             self.metadata_tree.column(c, width=w, anchor="w")
         self.metadata_tree.pack(fill="both", expand=True)
+        _attach_column_sort(self.metadata_tree)
         self.metadata_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_metadata_selection_changed())
 
         edit_frame = ttk.LabelFrame(right, text="Editare")
@@ -1244,13 +1245,26 @@ class SeratoMigratorApp:
         self.tracks_tree.heading("#0", text="Status")
         self.tracks_tree.column("#0", width=60, anchor="center", stretch=False)
         for c, w in zip(cols, (200, 200, 420)):
-            self.tracks_tree.heading(c, text=c.capitalize())
+            self.tracks_tree.heading(c, text=c.capitalize(),
+                                     command=lambda c=c: self._sort_tracks(c))
             self.tracks_tree.column(c, width=w, anchor="w")
         self.tracks_tree.pack(fill="both", expand=True)
 
         # mapare: id nod tree -> (library, crate) sau None pt noduri intermediare
         self._crate_node_map: dict[str, tuple[scanner.SeratoLibrary, object]] = {}
         self._current_tracks_data: list[tuple[str, str, str, bool]] = []   # artist, titlu, cale, exista
+        self._tracks_sort: tuple[int, bool] | None = None   # (index coloana, ascendent)
+
+    def _sort_tracks(self, col: str):
+        idx = {"artist": 0, "titlu": 1, "cale": 2}[col]
+        asc = not (self._tracks_sort and self._tracks_sort[0] == idx and self._tracks_sort[1])
+        self._tracks_sort = (idx, asc)
+        for c in ("artist", "titlu", "cale"):
+            arrow = ""
+            if c == col:
+                arrow = "  ↑" if asc else "  ↓"
+            self.tracks_tree.heading(c, text=c.capitalize() + arrow)
+        self._render_tracks_tree()
 
     def _refresh_crates_tree(self):
         self.crates_tree.delete(*self.crates_tree.get_children())
@@ -1297,7 +1311,11 @@ class SeratoMigratorApp:
     def _render_tracks_tree(self):
         self.tracks_tree.delete(*self.tracks_tree.get_children())
         filt = self.track_filter_var.get()
-        for artist, title, abs_path, exists in self._current_tracks_data:
+        rows = list(self._current_tracks_data)
+        if self._tracks_sort is not None:
+            idx, asc = self._tracks_sort
+            rows.sort(key=lambda r: str(r[idx]).lower(), reverse=not asc)
+        for artist, title, abs_path, exists in rows:
             if filt == "ok" and not exists:
                 continue
             if filt == "lipsa" and exists:
@@ -1327,6 +1345,7 @@ class SeratoMigratorApp:
         self.orphans_list.column("cale", width=700, anchor="w")
         self.orphans_list.column("marime", width=100, anchor="e")
         self.orphans_list.pack(fill="both", expand=True, padx=4, pady=4)
+        _attach_column_sort(self.orphans_list, numeric_cols=("marime",))
 
     def _refresh_orphan_lib_choices(self):
         roots = [lib.volume_root for lib in self.libraries]
@@ -1935,6 +1954,34 @@ def _human_size(n: int) -> str:
             return f"{size:.1f}{unit}"
         size /= 1024
     return f"{size:.1f}PB"
+
+
+def _attach_column_sort(tree, numeric_cols: tuple[str, ...] = ()):
+    """Face antetele coloanelor unui Treeview 'show=headings' sa sorteze la click
+    (asc/desc, cu sageata). Sorteaza randurile deja prezente in arbore."""
+    import re as _re
+    state: dict[str, bool] = {}
+    base_text = {c: tree.heading(c, "text") for c in tree["columns"]}
+
+    def num_key(v: str) -> float:
+        m = _re.search(r"-?\d+(?:[.,]\d+)?", v or "")
+        return float(m.group().replace(",", ".")) if m else float("-inf")
+
+    def sort_by(col: str):
+        asc = not state.get(col, False)
+        state.clear()
+        state[col] = asc
+        rows = [(tree.set(k, col), k) for k in tree.get_children("")]
+        key = (lambda t: num_key(t[0])) if col in numeric_cols else (lambda t: (t[0] or "").lower())
+        rows.sort(key=key, reverse=not asc)
+        for i, (_, k) in enumerate(rows):
+            tree.move(k, "", i)
+        for c in tree["columns"]:
+            arrow = ("  ↑" if asc else "  ↓") if c == col else ""
+            tree.heading(c, text=base_text[c] + arrow)
+
+    for c in tree["columns"]:
+        tree.heading(c, command=lambda c=c: sort_by(c))
 
 
 def main():
