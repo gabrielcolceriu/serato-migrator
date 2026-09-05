@@ -383,11 +383,9 @@ class AppDelegate(NSObject):
 
     def _librariesScanned_(self, libs):
         self._libraries = list(libs)
-        ts = state.get_dict(state.K_SCAN_TIMESTAMPS)
-        now = NSDate.date().description()
+        from . import health as _health
         for lib in self._libraries:
-            ts[str(lib.volume_root)] = str(now)
-        state.set_dict(state.K_SCAN_TIMESTAMPS, ts)
+            _health.mark_scanned(str(lib.volume_root))
         if not state.get(state.K_ACTIVE_LIBRARY_ROOT) and self._libraries:
             state.set(state.K_ACTIVE_LIBRARY_ROOT, str(self._libraries[0].volume_root))
         n = len(self._libraries)

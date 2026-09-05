@@ -72,21 +72,23 @@ class SidebarController(NSObject):
             NSIndexSet.indexSetWithIndex_(row), False)
 
     def refreshFooter(self):
+        from . import health as _health
         lib = self._app.activeLibrary()
         if lib is None:
             self._f_name.setStringValue_("Nicio bibliotecă")
             self._f_count.setStringValue_("")
             self._f_health.setStringValue_("")
+            self._health_target = None
             return
-        missing = len(lib.missing_tracks)
+        h = _health.library_health(lib, scanning=self._app.isBusy())
+        self._health_target = h.target
         self._f_name.setStringValue_(lib.name)
         self._f_count.setStringValue_(f"{theme.format_int(len(lib.present_tracks))} track-uri")
-        if missing == 0:
-            self._f_health.setStringValue_("✓ Totul este în regulă")
-            self._f_health.setTextColor_(NSColor.secondaryLabelColor())
-        else:
-            self._f_health.setStringValue_(f"⚠ {missing} fișiere lipsă")
-            self._f_health.setTextColor_(NSColor.systemOrangeColor())
+        mark = {"ok": "✓", "scanning": "↻"}.get(h.key, "⚠")
+        self._f_health.setStringValue_(f"{mark} {h.label}")
+        self._f_health.setTextColor_(
+            NSColor.secondaryLabelColor() if h.key in ("ok", "scanning")
+            else NSColor.systemOrangeColor())
 
     # ---- build ----
     @objc.python_method
@@ -220,8 +222,9 @@ class SidebarController(NSObject):
         self._app.selectDestination_(rid)
 
     def footerClicked_(self, gr):
-        self.selectDestination("overview")
-        self._app.selectDestination_("overview")
+        target = getattr(self, "_health_target", None) or "overview"
+        self.selectDestination(target)
+        self._app.selectDestination_(target)
 
     def accessibilityChanged_(self, note):
         self._applyTransparencyPreference_()
