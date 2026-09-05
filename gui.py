@@ -16,7 +16,7 @@ import scanner
 import copier
 
 APP_TITLE = "Serato Migrator"
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 BASE_FONT_SIZE = 14
 MONO_FONT_SIZE = 13
@@ -1371,6 +1371,16 @@ class SeratoMigratorApp:
         self.scan_orphans_btn = ttk.Button(top, text="Scaneaza dupa orfane", command=self._scan_orphans)
         self.scan_orphans_btn.pack(side="left", padx=10)
 
+        self.orphans_to_crate_btn = ttk.Button(top, text="Adauga in crate «Orfane»",
+                                                command=self._add_orphans_to_crate, state="disabled")
+        self.orphans_to_crate_btn.pack(side="left", padx=2)
+        _Tooltip(self.orphans_to_crate_btn,
+                 "Adauga fisierele orfane gasite intr-un crate 'Orfane' si in "
+                 "database V2, ca sa le vezi in Serato. Backup la database V2 intai.")
+
+        self._last_orphans: list[Path] = []
+        self._last_orphan_lib: scanner.SeratoLibrary | None = None
+
         self.orphans_info_var = StringVar(value="")
         ttk.Label(self.tab_orphans, textvariable=self.orphans_info_var).pack(fill="x", padx=4)
 
@@ -1400,12 +1410,17 @@ class SeratoMigratorApp:
             return
 
         known: set[str] = set()
+        owner_lib = None
         for lib in self.libraries:
             if lib.volume_root == root_path or root_path.startswith(lib.volume_root + "/"):
                 known.update(t.abs_path for t in lib.tracks.values())
+                if owner_lib is None or len(lib.volume_root) > len(owner_lib.volume_root):
+                    owner_lib = lib
+        self._last_orphan_lib = owner_lib
 
         self.log(f"Scanez {root_path} dupa fisiere orfane (necunoscute de Serato)...")
         self.scan_orphans_btn["state"] = "disabled"
+        self.orphans_to_crate_btn["state"] = "disabled"
         t0 = time.time()
         progress_q: queue.Queue = queue.Queue()
         self._begin_busy("scanare fisiere orfane")
@@ -1453,6 +1468,59 @@ class SeratoMigratorApp:
         self.orphans_info_var.set(f"{count_text}, {_human_size(total_bytes)} total.")
         self.set_status("Scanare orfane terminata.")
         self.log(f"Scanare orfane terminata in {elapsed:.1f}s: {count_text}, {_human_size(total_bytes)} total.")
+
+        self._last_orphans = list(orphans)
+        can_add = bool(orphans) and self._last_orphan_lib is not None
+        self.orphans_to_crate_btn["state"] = "normal" if can_add else "disabled"
+
+    def _add_orphans_to_crate(self):
+        lib = self._last_orphan_lib
+        if not lib or not self._last_orphans:
+            return
+        if not self._guard_serato_not_running():
+            return
+        n = len(self._last_orphans)
+        if not ask_yesno(
+            self.root, APP_TITLE,
+            f"Se adauga {n} fisiere orfane in crate-ul «Orfane» al bibliotecii "
+            f"'{lib.name}' si in database V2 (ca sa le vezi in Serato).\n\n"
+            f"Se face backup la database V2 intai. Fisierele nu sunt mutate/redenumite.\n\n"
+            f"Continui?",
+        ):
+            return
+        self.orphans_to_crate_btn["state"] = "disabled"
+        self._begin_busy("adaugare orfane in crate")
+        q: queue.Queue = queue.Queue()
+
+        def work():
+            try:
+                q.put(("ok", copier.add_orphans_to_crate(lib, self._last_orphans)))
+            except Exception as exc:  # noqa: BLE001
+                q.put(("err", repr(exc)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+        def poll():
+            try:
+                kind, payload = q.get_nowait()
+            except queue.Empty:
+                self.root.after(200, poll)
+                return
+            self._end_busy("adaugare orfane in crate")
+            self.orphans_to_crate_btn["state"] = "normal"
+            if kind == "err":
+                self.log(f"EROARE la adaugarea orfanelor: {payload}")
+                show_warning(self.root, APP_TITLE, f"A esuat:\n\n{payload}")
+                return
+            added_crate, added_db = payload
+            msg = (f"Adaugate in crate «Orfane»: {added_crate}\n"
+                   f"Adaugate in database V2: {added_db}\n\n"
+                   f"Redeschide Serato (sau reincarca biblioteca) ca sa le vezi.")
+            self.log("Orfane adaugate. " + msg.replace("\n", " "))
+            show_info(self.root, APP_TITLE, msg)
+            self.refresh_libraries()
+
+        self.root.after(200, poll)
 
     # ---------------------------------------------------------- Tab Migrare
     def _build_tab_migrate(self):

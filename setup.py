@@ -14,7 +14,7 @@ OPTIONS = {
         "CFBundleName": "Serato Migrator",
         "CFBundleDisplayName": "Serato Migrator",
         "CFBundleIdentifier": "com.gabrielcolceriu.seratomigrator",
-        "CFBundleShortVersionString": "0.5.0",
+        "CFBundleShortVersionString": "0.6.0",
         "NSHumanReadableCopyright": "© Gabriel Colceriu",
     },
 }
