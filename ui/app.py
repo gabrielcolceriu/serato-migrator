@@ -39,21 +39,8 @@ except Exception:  # pragma: no cover
     APP_VERSION = "0.0.0"
 
 
-# --------------------------------------------------------------------------- nav
-# (id, label, sf-symbol-ish name, is_group_header)
-NAV = [
-    ("overview", "Prezentare", "square.grid.2x2", False),
-    ("__lib", "BIBLIOTECĂ", None, True),
-    ("libraries", "Biblioteci", "internaldrive", False),
-    ("crates", "Crate-uri", "square.stack.3d.up", False),
-    ("orphans", "Fișiere orfane", "questionmark.folder", False),
-    ("__tools", "INSTRUMENTE", None, True),
-    ("migrate", "Migrare", "shippingbox", False),
-    ("metadata", "Metadata", "tag", False),
-    ("__system", "SISTEM", None, True),
-    ("journal", "Jurnal", "list.bullet.rectangle", False),
-]
-NAV_TITLES = {i: lbl for i, lbl, _s, grp in NAV if not grp}
+# nav model + the grouped source-list sidebar live in ui.sidebar (UI-02)
+from .sidebar import SidebarController, NAV, NAV_TITLES, NAV_IDS  # noqa: E402,F401
 
 
 def _label(text, *, bold=False, secondary=False, size=13):
@@ -102,46 +89,6 @@ class ContentRouter(NSObject):
         return make_screen(dest_id, self._delegate)
 
 
-# ----------------------------------------------------------------- sidebar (src)
-class SidebarDataSource(NSObject):
-    def initWithDelegate_(self, delegate):
-        self = objc.super(SidebarDataSource, self).init()
-        if self is None:
-            return None
-        self._delegate = delegate
-        self._rows = NAV
-        return self
-
-    # flat outline (single level) — group headers are non-selectable rows
-    def outlineView_numberOfChildrenOfItem_(self, ov, item):
-        return 0 if item is not None else len(self._rows)
-
-    def outlineView_child_ofItem_(self, ov, idx, item):
-        return idx
-
-    def outlineView_isItemExpandable_(self, ov, item):
-        return False
-
-    def outlineView_objectValueForTableColumn_byItem_(self, ov, col, item):
-        return self._rows[item][1]
-
-    def outlineView_isGroupItem_(self, ov, item):
-        return self._rows[item][3]
-
-    def outlineView_shouldSelectItem_(self, ov, item):
-        return not self._rows[item][3]
-
-    def outlineViewSelectionDidChange_(self, note):
-        ov = note.object()
-        row = ov.selectedRow()
-        if row < 0:
-            return
-        dest = self._rows[row][0]
-        if dest.startswith("__"):
-            return
-        self._delegate.selectDestination_(dest)
-
-
 # --------------------------------------------------------------- window + toolbar
 class MainWindowController(NSWindowController):
     def initWithAppDelegate_(self, delegate):
@@ -186,29 +133,9 @@ class MainWindowController(NSWindowController):
         split.setTranslatesAutoresizingMaskIntoConstraints_(True)
         self._split = split
 
-        # sidebar
-        ov = NSOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 600))
-        col = NSTableColumn.alloc().initWithIdentifier_("main")
-        col.setWidth_(200)
-        ov.addTableColumn_(col)
-        ov.setOutlineTableColumn_(col)
-        ov.setHeaderView_(None)
-        ov.setRowSizeStyle_(1)  # small/standard
-        ov.setFloatsGroupRows_(False)
-        ov.setSelectionHighlightStyle_(1)  # source list
-        ov.setIndentationPerLevel_(0)
-        self._sidebar_ds = SidebarDataSource.alloc().initWithDelegate_(self._delegate)
-        ov.setDataSource_(self._sidebar_ds)
-        ov.setDelegate_(self._sidebar_ds)
-        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
-            self._sidebar_ds, b"outlineViewSelectionDidChange:",
-            "NSOutlineViewSelectionDidChangeNotification", ov)
-        self._sidebar = ov
-        sb_scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 220, 600))
-        sb_scroll.setDocumentView_(ov)
-        sb_scroll.setHasVerticalScroller_(True)
-        sb_scroll.setDrawsBackground_(False)
-        sb_scroll.setBorderType_(0)
+        # sidebar (grouped source list + active-library footer)
+        self._sidebar_ctl = SidebarController.alloc().initWithAppDelegate_(self._delegate)
+        sb_scroll = self._sidebar_ctl.view()
 
         # content container
         container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 900, 600))
@@ -301,11 +228,10 @@ class MainWindowController(NSWindowController):
         state.set(state.K_SIDEBAR_COLLAPSED, collapsed)
 
     def selectSidebarRowForDestination_(self, dest_id):
-        for row, (i, *_rest) in enumerate(NAV):
-            if i == dest_id:
-                self._sidebar.selectRowIndexes_byExtendingSelection_(
-                    NSIndexSet.indexSetWithIndex_(row), False)
-                break
+        self._sidebar_ctl.selectDestination(dest_id)
+
+    def refreshSidebarFooter(self):
+        self._sidebar_ctl.refreshFooter()
 
     # --- NSWindowDelegate ---
     def windowDidResize_(self, note):
@@ -333,16 +259,21 @@ class AppDelegate(NSObject):
 
     # --- lifecycle ---
     def applicationDidFinishLaunching_(self, note):
-        state.register_defaults()
-        self._applyAppearance()
-        self._buildMenu()
-        self._wc = MainWindowController.alloc().initWithAppDelegate_(self)
-        self._wc.showWindow_(None)
-        NSApp().activateIgnoringOtherApps_(True)
-        last = state.get(state.K_SELECTED_DESTINATION) or "overview"
-        self.selectDestination_(last)
-        self._wc.selectSidebarRowForDestination_(last)
-        self.rescanLibraries_(None)
+        try:
+            state.register_defaults()
+            self._applyAppearance()
+            self._buildMenu()
+            self._wc = MainWindowController.alloc().initWithAppDelegate_(self)
+            self._wc.showWindow_(None)
+            NSApp().activateIgnoringOtherApps_(True)
+            last = state.get(state.K_SELECTED_DESTINATION) or "overview"
+            self.selectDestination_(last)
+            self._wc.selectSidebarRowForDestination_(last)
+            self.rescanLibraries_(None)
+        except Exception:
+            import traceback
+            Path("/tmp/seratomigrator_startup_error.txt").write_text(traceback.format_exc())
+            raise
 
     def applicationShouldTerminateAfterLastWindowClosed_(self, app):
         return True
@@ -390,6 +321,8 @@ class AppDelegate(NSObject):
         missing = sum(len(l.missing_tracks) for l in self._libraries)
         self.log_(f"{n} biblioteci · {missing} track-uri lipsă", "info", "scan")
         self._endBusy_("scanare biblioteci")
+        if self._wc is not None:
+            self._wc.refreshSidebarFooter()
         if self._router is not None:
             for vc in getattr(self._router, "_vcs", {}).values():
                 if hasattr(vc, "librariesChanged"):
@@ -407,10 +340,16 @@ class AppDelegate(NSObject):
 
     def setActiveLibraryRoot_(self, root):
         state.set(state.K_ACTIVE_LIBRARY_ROOT, str(root))
+        if self._wc is not None:
+            self._wc.refreshSidebarFooter()
         if self._router is not None:
             for vc in getattr(self._router, "_vcs", {}).values():
                 if hasattr(vc, "librariesChanged"):
                     vc.librariesChanged()
+
+    def toggleSidebar_(self, sender):
+        if self._wc is not None:
+            self._wc.toggleSidebar_(sender)
 
     # --- toolbar generic ---
     def refreshCurrent_(self, sender):
@@ -495,6 +434,16 @@ class AppDelegate(NSObject):
         for title, sel, key in (("Decupează", b"cut:", "x"), ("Copiază", b"copy:", "c"),
                                  ("Lipește", b"paste:", "v"), ("Selectează tot", b"selectAll:", "a")):
             edit_menu.addItemWithTitle_action_keyEquivalent_(title, sel, key)
+
+        # Vizualizare
+        view_item = NSMenuItem.alloc().init()
+        mainmenu.addItem_(view_item)
+        view_menu = NSMenu.alloc().initWithTitle_("Vizualizare")
+        view_item.setSubmenu_(view_menu)
+        mi = view_menu.addItemWithTitle_action_keyEquivalent_(
+            "Ascunde/Arată bara laterală", b"toggleSidebar:", "s")
+        mi.setKeyEquivalentModifierMask_((1 << 20) | (1 << 19))  # cmd | alt
+        mi.setTarget_(self)
 
         # Fereastră
         win_item = NSMenuItem.alloc().init()
