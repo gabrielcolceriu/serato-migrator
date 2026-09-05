@@ -1,53 +1,76 @@
-# Serato Migrator
+<h1 align="center">Serato Migrator</h1>
 
-Unealta personala pentru administrarea unei biblioteci Serato DJ Pro: gaseste
-bibliotecile Serato de pe disk (locala sau pe volume externe), verifica ce
-track-uri exista efectiv pe disk, gaseste fisiere orfane, si copiaza/reorganizeaza
-track-urile pe un disk nou (in foldere numite dupa crate-uri), inclusiv baza de
-date Serato, astfel incat noua locatie sa fie utilizabila fara "Locate Missing
-Files" manual.
+<p align="center">
+  <img src="assets/logo.png" alt="Serato Migrator" width="140">
+</p>
 
-## Ce face
+<p align="center">
+  <img src="https://img.shields.io/badge/version-0.4.0-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/platform-macOS-000000?style=for-the-badge&logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.13">
+  <img src="https://img.shields.io/badge/status-neoficial-lightgrey?style=for-the-badge" alt="Neoficial">
+</p>
 
-- **Biblioteci** – detecteaza automat toate bibliotecile Serato (`_Serato_`)
-  de pe disk si arata cate track-uri sunt cunoscute / prezente / lipsa.
-- **Crate-uri** – navigheaza arborele de crate-uri si vezi ce track-uri
-  lipsesc de pe disk.
-- **Fisiere orfane** – gaseste fisiere audio de pe disk care nu sunt
-  cunoscute de nicio biblioteca Serato.
-- **Migrare / Reorganizare** – copiaza track-urile intr-o structura de
-  foldere dupa crate, copiaza folderul `_Serato_`, rescrie caile din baza de
-  date copiata, si normalizeaza numele de fisiere scrise complet cu
-  majuscule. Fisierele originale nu sunt niciodata sterse sau modificate.
-  La previzualizare calculeaza cat spatiu ii trebuie pe destinatie (copii +
-  hardlink-uri care ajung pe alt volum + folderul `_Serato_`) si compara cu
-  spatiul liber - daca **nu incape**, avertizeaza inainte si cere confirmare
-  explicita ca sa nu ramai cu o copiere oprita la jumatate. Poti alege exact
-  **ce crate-uri** migrezi (arbore cu bife, marime per crate + total live),
-  util cand biblioteca intreaga nu incape pe discul destinatie.
-- **Metadata** – gaseste track-uri unde artistul lipseste (sau e ingropat in
-  titlu, gen "Artist - Titlu") si permite revizuirea si aplicarea corectiei,
-  plus editare individuala sau de grup a Artist/Titlu/Album/Gen. Scrie atat
-  in baza de date Serato cat si in tag-urile ID3 ale fisierelor (`mutagen`).
+<p align="center">
+  Unealtă personală pentru administrarea unei biblioteci <strong>Serato DJ Pro</strong>: găsește
+  bibliotecile de pe disc, verifică ce track-uri există efectiv, găsește fișiere orfane și
+  <strong>migrează / reorganizează</strong> track-urile pe un disc nou (în foldere numite după
+  crate-uri), cu tot cu baza de date — noua locație e utilizabilă fără „Locate Missing Files" manual.
+</p>
 
-## Cum functioneaza
+---
 
-Formatul binar al Serato (`database V2` si fisierele `.crate`) e reverse
-engineered de comunitate (nu exista o libraria oficiala) - vezi `serato_db.py`
-pentru parser/serializer.
+## ✨ Ce face
 
-## Rulare
+| | |
+|---|---|
+| 📚 **Biblioteci** | Detectează automat toate bibliotecile Serato (`_Serato_`) de pe disc (locală + volume externe montate) și arată câte track-uri sunt cunoscute / prezente / lipsă. |
+| 🗂️ **Crate-uri** | Navighează arborele de crate-uri și vezi ce track-uri lipsesc de pe disc. |
+| 🔎 **Fișiere orfane** | Găsește fișiere audio de pe disc care nu sunt cunoscute de nicio bibliotecă Serato. |
+| 🚚 **Migrare / Reorganizare** | Copiază track-urile într-o structură de foldere după crate, copiază folderul `_Serato_`, **rescrie căile** din baza de date copiată și normalizează numele scrise complet cu MAJUSCULE. Originalele nu sunt niciodată șterse sau modificate. |
+| 📏 **Verificare spațiu** | La previzualizare calculează cât spațiu îi trebuie pe destinație (copii + hardlink-uri cross-volum + folderul `_Serato_`) și **avertizează dacă nu încape**, cu confirmare explicită. |
+| ✅ **Selecție crate-uri** | Alegi exact ce crate-uri migrezi (arbore cu bife, mărime per crate + total live) — util când biblioteca întreagă nu încape pe discul destinație. |
+| 🏷️ **Metadata** | Găsește track-uri unde artistul lipsește (sau e îngropat în titlu, gen „Artist - Titlu"), permite revizuirea și corecția, plus editare individuală sau de grup a Artist / Titlu / Album / Gen. Scrie atât în baza de date Serato cât și în tag-urile ID3 (`mutagen`). |
+| 🛡️ **Siguranță** | Blochează scrierile cât timp Serato DJ Pro rulează; cere confirmare la închidere și nu se închide în timpul unei operațiuni. |
 
-```
+---
+
+## 🚀 Rulare din sursă
+
+```bash
 python3 main.py
 ```
 
-## Build ca aplicatie .app (macOS)
+Necesită Python 3.13 și `mutagen` (`pip3 install mutagen`).
 
-```
-pip3 install py2app
+---
+
+## 📦 Build ca aplicație `.app` (macOS)
+
+```bash
+pip3 install py2app mutagen
 python3 build_icon.py
 python3 setup.py py2app
 ```
 
-Rezultatul apare in `dist/Serato Migrator.app`.
+Rezultatul apare în `dist/Serato Migrator.app`.
+
+---
+
+## 🔧 Cum funcționează
+
+Formatul binar al Serato (`database V2` și fișierele `.crate`) e **reverse-engineered de comunitate**
+(nu există o librărie oficială Serato) — vezi [`serato_db.py`](serato_db.py) pentru parser / serializer
+TLV. Același format e folosit și de Mixxx, `serato-tags` etc.
+
+Migrarea nu atinge niciodată biblioteca sursă: copiază fișierele, copiază `_Serato_` la rădăcina
+destinației și rescrie **doar copia** bazei de date, ca Serato să vadă track-urile la noua locație
+fără relocare manuală.
+
+---
+
+## ⚠️ Disclaimer
+
+Unealtă **neoficială**, fără legătură cu Serato. Operează pe copii — fișierele și baza de date
+originale nu sunt șterse sau modificate — dar rămâne responsabilitatea ta să ai un backup înainte
+de o migrare mare.
