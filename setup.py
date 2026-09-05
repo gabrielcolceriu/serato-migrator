@@ -9,7 +9,10 @@ DATA_FILES = []
 OPTIONS = {
     "argv_emulation": False,
     "iconfile": "AppIcon.icns",
-    "packages": ["mutagen"],
+    "packages": ["mutagen", "ui"],
+    "includes": [
+        "objc", "Foundation", "AppKit", "PyObjCTools", "PyObjCTools.AppHelper",
+    ],
     "plist": {
         "CFBundleName": "Serato Migrator",
         "CFBundleDisplayName": "Serato Migrator",
