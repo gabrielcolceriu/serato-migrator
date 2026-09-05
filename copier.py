@@ -59,6 +59,19 @@ class CopyPlan:
         return total
 
     @property
+    def link_bytes(self) -> int:
+        """Spatiul ocupat de hardlink-uri DACA ajung pe alt volum si devin copii
+        reale (vezi execute_plan). Pe acelasi volum raman hardlink-uri = 0 spatiu."""
+        total = 0
+        for op in self.operations:
+            if not op.is_primary:
+                try:
+                    total += op.source_path.stat().st_size
+                except OSError:
+                    pass
+        return total
+
+    @property
     def primary_count(self) -> int:
         return sum(1 for op in self.operations if op.is_primary)
 
@@ -181,6 +194,72 @@ def rewrite_serato_database(lib: SeratoLibrary, plan: CopyPlan, dest_serato_dir:
         entries = serato_db.parse_tlv(crate_dest_path.read_bytes())
         entries = serato_db.rewrite_paths(entries, "ptrk", new_by_raw)
         crate_dest_path.write_bytes(serato_db.serialize_tlv(entries))
+
+
+def dir_size(path: Path) -> int:
+    """Marimea totala (bytes) a unui folder, recursiv. Link-urile simbolice
+    frante si erorile de acces sunt ignorate."""
+    total = 0
+    for root, _dirs, files in os.walk(path):
+        for name in files:
+            fp = os.path.join(root, name)
+            try:
+                total += os.stat(fp, follow_symlinks=False).st_size
+            except OSError:
+                pass
+    return total
+
+
+def free_space(path: Path) -> int | None:
+    """Spatiul liber (bytes) pe volumul care contine `path`. Daca `path` inca nu
+    exista, urca la primul parinte existent. Returneaza None daca nu se poate afla."""
+    p = Path(path)
+    while not p.exists():
+        if p.parent == p:
+            return None
+        p = p.parent
+    try:
+        return shutil.disk_usage(p).free
+    except OSError:
+        return None
+
+
+def estimate_required_bytes(
+    plan: CopyPlan, dest_root: Path, serato_source_dir: Path | None = None
+) -> int:
+    """Cat spatiu ii trebuie planului pe destinatie: copiile reale, plus
+    hardlink-urile care ajung pe alt volum (devin copii), plus folderul _Serato_
+    daca e copiat si el."""
+    required = plan.total_bytes
+
+    dest_dev = None
+    probe = Path(dest_root)
+    while not probe.exists():
+        if probe.parent == probe:
+            break
+        probe = probe.parent
+    try:
+        dest_dev = os.stat(probe).st_dev
+    except OSError:
+        dest_dev = None
+
+    for op in plan.operations:
+        if op.is_primary:
+            continue
+        try:
+            same_vol = dest_dev is not None and op.source_path.stat().st_dev == dest_dev
+        except OSError:
+            same_vol = False
+        if not same_vol:
+            try:
+                required += op.source_path.stat().st_size
+            except OSError:
+                pass
+
+    if serato_source_dir is not None:
+        required += dir_size(Path(serato_source_dir))
+
+    return required
 
 
 def execute_plan(plan: CopyPlan, progress_callback=None):
