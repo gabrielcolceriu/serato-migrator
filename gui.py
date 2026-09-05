@@ -21,6 +21,11 @@ APP_VERSION = "0.3.0"
 BASE_FONT_SIZE = 14
 MONO_FONT_SIZE = 13
 
+# glife checkbox pentru arborele de crate-uri din tab-ul Migrare
+CHK_ON = "☑"    # casuta bifata
+CHK_OFF = "☐"   # casuta goala
+CHK_PART = "▣"  # patrat plin partial (unele copii selectate)
+
 # paleta moderna - albastrul e ales din mijlocul degradeului violet->turcoaz al logo-ului
 ACCENT = "#3B8FDA"
 ACCENT_DARK = "#327AB9"
@@ -1247,10 +1252,51 @@ class SeratoMigratorApp:
     # ---------------------------------------------------------- Tab Migrare
     def _build_tab_migrate(self):
         top = ttk.Frame(self.tab_migrate)
-        top.pack(fill="x", pady=6)
+        top.pack(fill="both", expand=True, pady=6)
 
-        self.migrate_checks_frame = ttk.LabelFrame(top, text="Biblioteci de inclus")
-        self.migrate_checks_frame.pack(side="left", fill="y", padx=4)
+        left = ttk.Frame(top)
+        left.pack(side="left", fill="y", padx=4)
+
+        self.migrate_checks_frame = ttk.LabelFrame(left, text="Biblioteci de inclus")
+        self.migrate_checks_frame.pack(fill="x")
+
+        crates_box = ttk.LabelFrame(left, text="Crate-uri de migrat")
+        crates_box.pack(fill="both", expand=True, pady=(8, 0))
+
+        cbtns = ttk.Frame(crates_box)
+        cbtns.pack(fill="x", padx=2, pady=2)
+        ttk.Button(cbtns, text="Toate", width=8,
+                   command=lambda: self._mig_select_all(True)).pack(side="left")
+        ttk.Button(cbtns, text="Niciunul", width=9,
+                   command=lambda: self._mig_select_all(False)).pack(side="left", padx=4)
+
+        tree_wrap = ttk.Frame(crates_box)
+        tree_wrap.pack(fill="both", expand=True, padx=2)
+        self.mig_crates_tree = ttk.Treeview(tree_wrap, show="tree", height=14, selectmode="none")
+        vsb = ttk.Scrollbar(tree_wrap, orient="vertical", command=self.mig_crates_tree.yview)
+        self.mig_crates_tree.configure(yscrollcommand=vsb.set)
+        self.mig_crates_tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.mig_crates_tree.bind("<Button-1>", self._mig_tree_click)
+
+        self.migrate_unsorted_var = BooleanVar(value=True)
+        ttk.Checkbutton(
+            crates_box, text="Include si track-urile care nu-s in niciun crate",
+            variable=self.migrate_unsorted_var,
+            command=self._mig_refresh_glyphs).pack(anchor=W, padx=4, pady=(2, 0))
+
+        self.mig_crate_summary_var = StringVar(value="")
+        ttk.Label(crates_box, textvariable=self.mig_crate_summary_var,
+                  font=(None, BASE_FONT_SIZE - 1)).pack(anchor=W, padx=4, pady=(0, 4))
+
+        # stare selectie crate-uri
+        self._mig_leaf_state: dict[str, bool] = {}          # node id -> selectat
+        self._mig_leaf_info: dict[str, tuple] = {}          # node id -> (lib, crate)
+        self._mig_node_parent: dict[str, str] = {}          # node id -> parinte
+        self._mig_group_leaves: dict[str, list[str]] = {}   # node grup/lib -> leaf node ids sub el
+        self._mig_crate_size: dict[str, int | None] = {}    # crate_key -> bytes prezenti (None = necalculat)
+        self._mig_crate_missing: dict[str, int] = {}
+        self._mig_size_queue: queue.Queue = queue.Queue()
 
         right = ttk.Frame(top)
         right.pack(side="left", fill="both", expand=True, padx=10)
@@ -1307,7 +1353,181 @@ class SeratoMigratorApp:
             var = BooleanVar(value=True)
             self.lib_vars[lib.name] = var
             ttk.Checkbutton(self.migrate_checks_frame, text=f"{lib.name} ({len(lib.tracks)} track-uri)",
-                             variable=var).pack(anchor=W, padx=4, pady=2)
+                             variable=var, command=self._build_migrate_crate_tree).pack(anchor=W, padx=4, pady=2)
+        self._build_migrate_crate_tree()
+
+    # ---------------------------------------------------- selectie crate-uri
+    def _build_migrate_crate_tree(self):
+        tree = self.mig_crates_tree
+        tree.delete(*tree.get_children())
+        self._mig_leaf_state.clear()
+        self._mig_leaf_info.clear()
+        self._mig_node_parent.clear()
+        self._mig_group_leaves.clear()
+
+        for lib in self._selected_libraries():
+            lib_node = tree.insert("", END, text=f"{CHK_ON} {lib.name}", open=True)
+            self._mig_group_leaves[lib_node] = []
+            group_nodes: dict[tuple, str] = {}
+            for crate in lib.crates:
+                parent = lib_node
+                for depth, segment in enumerate(crate.hierarchy):
+                    key = (lib.name,) + tuple(crate.hierarchy[: depth + 1])
+                    is_leaf = depth == len(crate.hierarchy) - 1
+                    if key not in group_nodes:
+                        node = tree.insert(parent, END, text=f"{CHK_ON} {segment}",
+                                            open=False)
+                        group_nodes[key] = node
+                        self._mig_node_parent[node] = parent
+                        if not is_leaf:
+                            self._mig_group_leaves[node] = []
+                    parent = group_nodes[key]
+                # `parent` e acum nodul-frunza al acestui crate
+                self._mig_leaf_state[parent] = True
+                self._mig_leaf_info[parent] = (lib, crate)
+                # inregistreaza frunza la toti stramosii-grup
+                anc = self._mig_node_parent.get(parent)
+                while anc is not None:
+                    self._mig_group_leaves.setdefault(anc, []).append(parent)
+                    anc = self._mig_node_parent.get(anc)
+                self._mig_group_leaves.setdefault(lib_node, [])
+                if parent not in self._mig_group_leaves[lib_node]:
+                    self._mig_group_leaves[lib_node].append(parent)
+
+        self._mig_refresh_glyphs()
+        self._start_mig_size_computation()
+
+    def _mig_leaf_label(self, node: str) -> str:
+        lib, crate = self._mig_leaf_info[node]
+        crate_key = str(crate.file_path)
+        name = crate.hierarchy[-1]
+        size = self._mig_crate_size.get(crate_key)
+        n = len(crate.raw_paths)
+        if size is None:
+            extra = f"{n} track-uri"
+        else:
+            miss = self._mig_crate_missing.get(crate_key, 0)
+            extra = f"{n - miss} track-uri, {_human_size(size)}"
+            if miss:
+                extra += f", {miss} lipsa"
+        state = self._mig_leaf_state.get(node, True)
+        return f"{CHK_ON if state else CHK_OFF} {name}  ·  {extra}"
+
+    def _mig_group_glyph(self, node: str) -> str:
+        leaves = self._mig_group_leaves.get(node, [])
+        if not leaves:
+            return CHK_OFF
+        vals = [self._mig_leaf_state.get(l, True) for l in leaves]
+        if all(vals):
+            return CHK_ON
+        if not any(vals):
+            return CHK_OFF
+        return CHK_PART
+
+    def _mig_refresh_glyphs(self):
+        tree = self.mig_crates_tree
+        for node in self._mig_leaf_state:
+            tree.item(node, text=self._mig_leaf_label(node))
+        for node in list(self._mig_group_leaves):
+            if node in self._mig_leaf_state:
+                continue
+            cur = tree.item(node, "text")
+            rest = cur.split(" ", 1)[1] if " " in cur else cur
+            tree.item(node, text=f"{self._mig_group_glyph(node)} {rest}")
+        # sumar
+        total_leaves = len(self._mig_leaf_state)
+        sel = [n for n, v in self._mig_leaf_state.items() if v]
+        sel_bytes = 0
+        have_all_sizes = True
+        for n in sel:
+            _lib, crate = self._mig_leaf_info[n]
+            s = self._mig_crate_size.get(str(crate.file_path))
+            if s is None:
+                have_all_sizes = False
+            else:
+                sel_bytes += s
+        approx = "" if have_all_sizes else " (se calculeaza...)"
+        size_txt = f" · ~{_human_size(sel_bytes)}{approx}" if sel else ""
+        unsorted = "  + ne-incadrate" if self.migrate_unsorted_var.get() else ""
+        self.mig_crate_summary_var.set(
+            f"{len(sel)}/{total_leaves} crate-uri selectate{size_txt}{unsorted}")
+
+    def _mig_tree_click(self, event):
+        tree = self.mig_crates_tree
+        # click pe triunghiul de expandare -> lasa comportamentul implicit
+        if tree.identify_element(event.x, event.y) == "Treeitem.indicator":
+            return
+        node = tree.identify_row(event.y)
+        if not node:
+            return
+        # nodul-biblioteca (radacina) nu are parinte inregistrat si nu e frunza
+        if node in self._mig_leaf_state:
+            new = not self._mig_leaf_state[node]
+            self._mig_leaf_state[node] = new
+        else:
+            leaves = self._mig_group_leaves.get(node, [])
+            if not leaves:
+                return
+            new = not all(self._mig_leaf_state.get(l, True) for l in leaves)
+            for l in leaves:
+                self._mig_leaf_state[l] = new
+        self._mig_refresh_glyphs()
+
+    def _mig_select_all(self, value: bool):
+        for n in self._mig_leaf_state:
+            self._mig_leaf_state[n] = value
+        self._mig_refresh_glyphs()
+
+    def _start_mig_size_computation(self):
+        pending = []
+        for node, (lib, crate) in self._mig_leaf_info.items():
+            ck = str(crate.file_path)
+            if ck not in self._mig_crate_size:
+                pending.append((lib, crate))
+        if not pending:
+            return
+
+        def work():
+            for lib, crate in pending:
+                present, missing, nbytes = copier.crate_stats(lib, crate)
+                self._mig_size_queue.put((str(crate.file_path), missing, nbytes))
+            self._mig_size_queue.put(None)
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(150, self._poll_mig_sizes)
+
+    def _poll_mig_sizes(self):
+        changed = False
+        try:
+            while True:
+                item = self._mig_size_queue.get_nowait()
+                if item is None:
+                    if changed:
+                        self._mig_refresh_glyphs()
+                    return
+                ck, missing, nbytes = item
+                self._mig_crate_size[ck] = nbytes
+                self._mig_crate_missing[ck] = missing
+                changed = True
+        except queue.Empty:
+            pass
+        if changed:
+            self._mig_refresh_glyphs()
+        self.root.after(200, self._poll_mig_sizes)
+
+    def _selected_crate_keys(self) -> set[str] | None:
+        """None = migrare completa (toate crate-urile + ne-incadrate), comportament
+        implicit. Altfel, setul de chei de crate de migrat."""
+        if not self._mig_leaf_state:
+            return None
+        all_selected = all(self._mig_leaf_state.values())
+        if all_selected and self.migrate_unsorted_var.get():
+            return None
+        return {
+            str(crate.file_path)
+            for node, (lib, crate) in self._mig_leaf_info.items()
+            if self._mig_leaf_state.get(node)
+        }
 
     def _browse_dest(self):
         folder = filedialog.askdirectory(title="Alege folderul destinatie")
@@ -1327,13 +1547,24 @@ class SeratoMigratorApp:
             show_warning(self.root, APP_TITLE, "Bifeaza cel putin o biblioteca.")
             return
 
+        selected_crate_keys = self._selected_crate_keys()
+        include_unsorted = self.migrate_unsorted_var.get()
+        if selected_crate_keys is not None and not selected_crate_keys and not include_unsorted:
+            show_warning(self.root, APP_TITLE, "Selecteaza cel putin un crate sau bifeaza "
+                                               "'Include si track-urile care nu-s in niciun crate'.")
+            return
+
         self.set_status("Calculez planul de copiere...")
-        self.log(f"Calculez planul de copiere pentru {', '.join(l.name for l in libs)} -> {dest}...")
+        scope = "toate crate-urile" if selected_crate_keys is None else f"{len(selected_crate_keys)} crate-uri"
+        self.log(f"Calculez planul de copiere pentru {', '.join(l.name for l in libs)} "
+                 f"({scope}) -> {dest}...")
 
         normalize_names = self.normalize_names_var.get()
 
         def work():
-            plan = copier.plan_copy(libs, Path(dest), normalize_names=normalize_names)
+            plan = copier.plan_copy(libs, Path(dest), normalize_names=normalize_names,
+                                     selected_crate_keys=selected_crate_keys,
+                                     include_unsorted=include_unsorted)
             self.root.after(0, lambda: self._on_plan_ready(plan))
 
         threading.Thread(target=work, daemon=True).start()
