@@ -54,17 +54,26 @@ def find_serato_libraries() -> list[SeratoLibrary]:
 
     libraries = []
     for volume_root, name in candidates:
-        serato_dir = Path(volume_root) / "_Serato_"
-        db_path = serato_dir / "database V2"
-        if not db_path.is_file():
-            continue
-        tracks = sdb.parse_database(db_path, volume_root=volume_root)
-        crates = sdb.load_subcrates(serato_dir)
-        libraries.append(SeratoLibrary(
-            name=name, volume_root=volume_root, serato_dir=serato_dir,
-            tracks=tracks, crates=crates,
-        ))
+        lib = load_library_at(volume_root, name)
+        if lib:
+            libraries.append(lib)
     return libraries
+
+
+def load_library_at(volume_root: str, name: str | None = None) -> SeratoLibrary | None:
+    """Incarca o biblioteca Serato dintr-un folder ales manual (ex: destinatia
+    unei migrari anterioare), nu doar din locatiile scanate automat."""
+    volume_root = str(Path(volume_root))
+    serato_dir = Path(volume_root) / "_Serato_"
+    db_path = serato_dir / "database V2"
+    if not db_path.is_file():
+        return None
+    tracks = sdb.parse_database(db_path, volume_root=volume_root)
+    crates = sdb.load_subcrates(serato_dir)
+    return SeratoLibrary(
+        name=name or Path(volume_root).name, volume_root=volume_root,
+        serato_dir=serato_dir, tracks=tracks, crates=crates,
+    )
 
 
 def crate_abs_paths(crate: sdb.Crate, volume_root: str) -> list[str]:

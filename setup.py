@@ -9,6 +9,7 @@ DATA_FILES = []
 OPTIONS = {
     "argv_emulation": False,
     "iconfile": "AppIcon.icns",
+    "packages": ["mutagen"],
     "plist": {
         "CFBundleName": "Serato Migrator",
         "CFBundleDisplayName": "Serato Migrator",

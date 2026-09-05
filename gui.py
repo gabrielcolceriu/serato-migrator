@@ -8,7 +8,7 @@ import tkinter.font as tkfont
 from pathlib import Path
 from tkinter import (
     Tk, Canvas, PhotoImage, Text, StringVar, BooleanVar, Toplevel, N, S, E, W, END, HORIZONTAL,
-    filedialog, messagebox,
+    filedialog,
 )
 from tkinter import ttk
 
@@ -290,6 +290,58 @@ def _build_dot_icon(size: int = 13, filled: bool = False, color: str = TEXT_MUTE
     return img
 
 
+def _show_dialog(parent, title: str, message: str, yesno: bool = False) -> bool:
+    """Dialog modal centrat exact peste fereastra `parent` - inlocuieste
+    tkinter.messagebox, care pe macOS ignora `parent` si centreaza pe ecran."""
+    win = Toplevel(parent)
+    win.title(title)
+    win.transient(parent)
+    win.resizable(False, False)
+    win.configure(bg=SURFACE)
+
+    frame = ttk.Frame(win, padding=20)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=message, wraplength=380, justify="left",
+              font=(None, BASE_FONT_SIZE)).pack(pady=(0, 18))
+
+    result = {"value": False}
+
+    def close(value):
+        result["value"] = value
+        win.destroy()
+
+    btns = ttk.Frame(frame)
+    btns.pack(anchor="e")
+    if yesno:
+        ttk.Button(btns, text="Nu", command=lambda: close(False)).pack(side="right", padx=(6, 0))
+        ttk.Button(btns, text="Da", command=lambda: close(True)).pack(side="right")
+    else:
+        ttk.Button(btns, text="OK", command=lambda: close(True)).pack(side="right")
+
+    win.update_idletasks()
+    w, h = win.winfo_width(), win.winfo_height()
+    parent.update_idletasks()
+    px, py = parent.winfo_rootx(), parent.winfo_rooty()
+    pw, ph = parent.winfo_width(), parent.winfo_height()
+    win.geometry(f"+{px + (pw - w) // 2}+{py + (ph - h) // 2}")
+
+    win.grab_set()
+    win.wait_window()
+    return result["value"]
+
+
+def show_info(parent, title: str, message: str):
+    _show_dialog(parent, title, message, yesno=False)
+
+
+def show_warning(parent, title: str, message: str):
+    _show_dialog(parent, title, message, yesno=False)
+
+
+def ask_yesno(parent, title: str, message: str) -> bool:
+    return _show_dialog(parent, title, message, yesno=True)
+
+
 class _Tooltip:
     """Tooltip simplu: apare la hover peste un widget, dupa o mica intarziere."""
 
@@ -465,6 +517,7 @@ class SeratoMigratorApp:
         self.tab_crates = ttk.Frame(content)
         self.tab_orphans = ttk.Frame(content)
         self.tab_migrate = ttk.Frame(content)
+        self.tab_metadata = ttk.Frame(content)
         self.tab_log = ttk.Frame(content)
         self.tab_about = ttk.Frame(content)
 
@@ -473,6 +526,7 @@ class SeratoMigratorApp:
             ("crates", "Crate-uri", self.tab_crates),
             ("orphans", "Fisiere orfane", self.tab_orphans),
             ("migrate", "Migrare / Reorganizare", self.tab_migrate),
+            ("metadata", "Metadata", self.tab_metadata),
             ("log", "Jurnal", self.tab_log),
             ("about", "Despre", self.tab_about),
         ]
@@ -495,6 +549,7 @@ class SeratoMigratorApp:
         self._build_tab_crates()
         self._build_tab_orphans()
         self._build_tab_migrate()
+        self._build_tab_metadata()
         self._build_tab_about()
 
         self._select_tab("libs")
@@ -553,6 +608,252 @@ class SeratoMigratorApp:
         self.log_text.configure(state="disabled")
 
     # ---------------------------------------------------------- Tab Despre
+    # ---------------------------------------------------------- Tab Metadata
+    def _build_tab_metadata(self):
+        import metadata_editor
+        self._metadata_editor = metadata_editor
+
+        top = ttk.Frame(self.tab_metadata)
+        top.pack(fill="x", pady=(0, 6))
+        ttk.Label(top, text="Biblioteca:").pack(side="left")
+        self.metadata_lib_var = StringVar()
+        self.metadata_lib_combo = ttk.Combobox(top, textvariable=self.metadata_lib_var, width=30, state="readonly")
+        self.metadata_lib_combo.pack(side="left", padx=4)
+        self.metadata_lib_combo.bind("<<ComboboxSelected>>", lambda _e: self._on_metadata_lib_selected())
+        ttk.Button(top, text="Deschide folder...", command=self._open_metadata_folder).pack(side="left", padx=4)
+
+        ttk.Label(top, text="Cauta:").pack(side="left", padx=(16, 4))
+        self.metadata_search_var = StringVar()
+        search_entry = ttk.Entry(top, textvariable=self.metadata_search_var, width=30)
+        search_entry.pack(side="left")
+        search_entry.bind("<Return>", lambda _e: self._search_metadata_tracks())
+        ttk.Button(top, text="Cauta", command=self._search_metadata_tracks).pack(side="left", padx=4)
+        ttk.Button(top, text="Analizeaza Artist/Titlu lipsa",
+                   command=self._analyze_artist_title).pack(side="left", padx=(16, 0))
+
+        self.metadata_info_var = StringVar(value="Alege o biblioteca si cauta track-uri.")
+        ttk.Label(self.tab_metadata, textvariable=self.metadata_info_var).pack(fill="x")
+
+        paned = ttk.Panedwindow(self.tab_metadata, orient="horizontal")
+        paned.pack(fill="both", expand=True, pady=(6, 0))
+        left = ttk.Frame(paned)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=3)
+        paned.add(right, weight=1)
+
+        cols = ("artist", "titlu", "album", "gen", "fisier")
+        self.metadata_tree = ttk.Treeview(left, columns=cols, show="headings")
+        for c, w in zip(cols, (180, 220, 160, 100, 260)):
+            self.metadata_tree.heading(c, text=c.capitalize())
+            self.metadata_tree.column(c, width=w, anchor="w")
+        self.metadata_tree.pack(fill="both", expand=True)
+        self.metadata_tree.bind("<<TreeviewSelect>>", lambda _e: self._on_metadata_selection_changed())
+
+        edit_frame = ttk.LabelFrame(right, text="Editare")
+        edit_frame.pack(fill="x", padx=(10, 0), pady=4)
+        self.metadata_edit_title_var = StringVar(value="Selecteaza track-uri in stanga")
+        ttk.Label(edit_frame, textvariable=self.metadata_edit_title_var,
+                  font=(None, BASE_FONT_SIZE - 1)).grid(row=0, column=0, columnspan=2, sticky=W, padx=6, pady=(6, 10))
+
+        self.metadata_field_vars: dict[str, StringVar] = {}
+        field_labels = {"artist": "Artist", "title": "Titlu", "album": "Album", "genre": "Gen"}
+        for i, (field, label) in enumerate(field_labels.items(), start=1):
+            var = StringVar()
+            self.metadata_field_vars[field] = var
+            ttk.Label(edit_frame, text=f"{label}:").grid(row=i, column=0, sticky=W, padx=6, pady=3)
+            ttk.Entry(edit_frame, textvariable=var, width=24).grid(row=i, column=1, sticky=(E, W), padx=6, pady=3)
+        edit_frame.grid_columnconfigure(1, weight=1)
+
+        self.metadata_write_id3_var = BooleanVar(value=True)
+        ttk.Checkbutton(edit_frame, text="Scrie si in tag-urile ID3 ale fisierelor",
+                         variable=self.metadata_write_id3_var).grid(
+            row=len(field_labels) + 1, column=0, columnspan=2, sticky=W, padx=6, pady=(6, 4))
+
+        self.metadata_save_btn = ttk.Button(edit_frame, text="Salveaza", command=self._save_metadata_edit,
+                                             state="disabled")
+        self.metadata_save_btn.grid(row=len(field_labels) + 2, column=0, columnspan=2, pady=(4, 8))
+
+        self._metadata_lib: scanner.SeratoLibrary | None = None
+        self._metadata_track_ids: list[str] = []
+
+    def _refresh_metadata_lib_choices(self):
+        names = [lib.name for lib in self.libraries]
+        self.metadata_lib_combo["values"] = names
+        if names and not self.metadata_lib_var.get():
+            self.metadata_lib_var.set(names[0])
+            self._on_metadata_lib_selected()
+
+    def _on_metadata_lib_selected(self):
+        name = self.metadata_lib_var.get()
+        self._metadata_lib = next((l for l in self.libraries if l.name == name), None)
+        self.metadata_tree.delete(*self.metadata_tree.get_children())
+        self.metadata_info_var.set(f"'{name}' selectata - {len(self._metadata_lib.tracks) if self._metadata_lib else 0} track-uri. Cauta ceva pentru a le afisa.")
+
+    def _open_metadata_folder(self):
+        folder = filedialog.askdirectory(title="Alege folderul radacina al bibliotecii (contine _Serato_)")
+        if not folder:
+            return
+        lib = scanner.load_library_at(folder)
+        if not lib:
+            show_warning(self.root, APP_TITLE, f"Nu am gasit un folder _Serato_ valid in:\n{folder}")
+            return
+        self.libraries.append(lib)
+        self._refresh_metadata_lib_choices()
+        self.metadata_lib_var.set(lib.name)
+        self._on_metadata_lib_selected()
+        self.log(f"Biblioteca '{lib.name}' incarcata manual din {folder} ({len(lib.tracks)} track-uri).")
+
+    def _search_metadata_tracks(self):
+        if not self._metadata_lib:
+            show_warning(self.root, APP_TITLE, "Alege mai intai o biblioteca.")
+            return
+        query = self.metadata_search_var.get().strip().lower()
+        self.metadata_tree.delete(*self.metadata_tree.get_children())
+        self._metadata_track_ids = []
+
+        count = 0
+        LIMIT = 500
+        for raw_path, track in self._metadata_lib.tracks.items():
+            filename = Path(track.abs_path).name
+            haystack = f"{track.artist or ''} {track.title or ''} {filename}".lower()
+            if query and query not in haystack:
+                continue
+            self.metadata_tree.insert("", END, iid=raw_path, values=(
+                track.artist or "", track.title or "", track.album or "", track.genre or "", filename,
+            ))
+            self._metadata_track_ids.append(raw_path)
+            count += 1
+            if count >= LIMIT:
+                break
+
+        total_matching = count if count < LIMIT else "500+"
+        self.metadata_info_var.set(f"Afisate {total_matching} track-uri" +
+                                    (f" (limitat la {LIMIT})" if count >= LIMIT else "") + ".")
+
+    def _on_metadata_selection_changed(self):
+        sel = self.metadata_tree.selection()
+        if not sel:
+            self.metadata_edit_title_var.set("Selecteaza track-uri in stanga")
+            self.metadata_save_btn["state"] = "disabled"
+            for var in self.metadata_field_vars.values():
+                var.set("")
+            return
+
+        self.metadata_save_btn["state"] = "normal"
+        if len(sel) == 1:
+            track = self._metadata_lib.tracks.get(sel[0])
+            self.metadata_edit_title_var.set(f"Track: {Path(track.abs_path).name}")
+            self.metadata_field_vars["artist"].set(track.artist or "")
+            self.metadata_field_vars["title"].set(track.title or "")
+            self.metadata_field_vars["album"].set(track.album or "")
+            self.metadata_field_vars["genre"].set(track.genre or "")
+        else:
+            self.metadata_edit_title_var.set(
+                f"Editare de grup - {len(sel)} track-uri (campurile goale nu se modifica)")
+            for var in self.metadata_field_vars.values():
+                var.set("")
+
+    def _save_metadata_edit(self):
+        sel = self.metadata_tree.selection()
+        if not sel or not self._metadata_lib:
+            return
+        me = self._metadata_editor
+        field_tags = {"artist": "tart", "title": "tsng", "album": "talb", "genre": "tgen"}
+
+        is_single = len(sel) == 1
+        if is_single:
+            # editare individuala: aplicam toate cele 4 campuri asa cum sunt in formular
+            # (inclusiv daca sunt golite intentionat)
+            fields = {field_tags[f]: v.get().strip() for f, v in self.metadata_field_vars.items()}
+        else:
+            # editare de grup: doar campurile completate se aplica, restul raman neatinse
+            fields = {field_tags[f]: v.get().strip() for f, v in self.metadata_field_vars.items()
+                      if v.get().strip()}
+        edits: dict[str, dict[str, str]] = {raw_path: fields for raw_path in sel} if fields else {}
+
+        if not edits:
+            show_info(self.root, APP_TITLE, "Nimic de salvat - completeaza cel putin un camp.")
+            return
+
+        write_id3 = self.metadata_write_id3_var.get()
+        self.log(f"Salvez metadata pentru {len(edits)} track-uri (ID3: {'da' if write_id3 else 'nu'})...")
+        me.apply_edits(self._metadata_lib, edits, write_id3=write_id3)
+        self.log("Metadata salvata.")
+
+        # reincarcam din disc valorile actualizate pentru track-urile afectate
+        fresh = scanner.load_library_at(self._metadata_lib.volume_root, self._metadata_lib.name)
+        if fresh:
+            self._metadata_lib.tracks = fresh.tracks
+        for raw_path in sel:
+            track = self._metadata_lib.tracks.get(raw_path)
+            if track:
+                filename = Path(track.abs_path).name
+                self.metadata_tree.item(raw_path, values=(
+                    track.artist or "", track.title or "", track.album or "", track.genre or "", filename,
+                ))
+        show_info(self.root, APP_TITLE, f"Metadata salvata pentru {len(edits)} track-uri.")
+
+    def _analyze_artist_title(self):
+        if not self._metadata_lib:
+            show_warning(self.root, APP_TITLE, "Alege mai intai o biblioteca.")
+            return
+        me = self._metadata_editor
+        self.log(f"Analizez '{self._metadata_lib.name}' pentru Artist/Titlu lipsa...")
+        suggestions = me.suggest_artist_title_fixes(self._metadata_lib)
+        self.log(f"Gasite {len(suggestions)} track-uri cu sugestii de corectie.")
+        if not suggestions:
+            show_info(self.root, APP_TITLE, "Niciun track nu are nevoie de corectie Artist/Titlu.")
+            return
+        self._show_artist_title_review(suggestions)
+
+    def _show_artist_title_review(self, suggestions):
+        win = Toplevel(self.root)
+        win.title("Corectie Artist / Titlu")
+        win.geometry("1000x600")
+
+        ttk.Label(win, text=f"{len(suggestions)} sugestii - deselecteaza ce nu vrei sa aplici, apoi 'Aplica'.",
+                  style="Status.TLabel").pack(fill="x")
+
+        tree = ttk.Treeview(win, columns=("fisier", "artist_vechi", "titlu_vechi", "artist_nou", "titlu_nou"),
+                             show="headings", selectmode="extended")
+        headings = {"fisier": "Fisier", "artist_vechi": "Artist (vechi)", "titlu_vechi": "Titlu (vechi)",
+                    "artist_nou": "Artist (nou)", "titlu_nou": "Titlu (nou)"}
+        for c, w in zip(tree["columns"], (260, 160, 220, 160, 220)):
+            tree.heading(c, text=headings[c])
+            tree.column(c, width=w, anchor="w")
+        tree.pack(fill="both", expand=True, padx=6, pady=6)
+
+        by_iid = {}
+        for i, s in enumerate(suggestions):
+            iid = str(i)
+            tree.insert("", END, iid=iid, values=(s.filename, s.old_artist, s.old_title, s.new_artist, s.new_title))
+            by_iid[iid] = s
+        tree.selection_set(list(by_iid.keys()))   # implicit toate bifate/selectate
+
+        write_id3_var = BooleanVar(value=True)
+        ttk.Checkbutton(win, text="Scrie si in tag-urile ID3 ale fisierelor",
+                         variable=write_id3_var).pack(anchor=W, padx=6)
+
+        def apply_selected():
+            selected = tree.selection()
+            if not selected:
+                show_info(self.root, APP_TITLE, "Nu ai selectat nimic.")
+                return
+            edits = {}
+            for iid in selected:
+                s = by_iid[iid]
+                edits[s.raw_path] = {"tart": s.new_artist, "tsng": s.new_title}
+            self.log(f"Aplic corectia Artist/Titlu pentru {len(edits)} track-uri...")
+            self._metadata_editor.apply_edits(self._metadata_lib, edits, write_id3=write_id3_var.get())
+            self.log("Corectie aplicata.")
+            fresh = scanner.load_library_at(self._metadata_lib.volume_root, self._metadata_lib.name)
+            if fresh:
+                self._metadata_lib.tracks = fresh.tracks
+            show_info(self.root, APP_TITLE, f"Corectie aplicata pentru {len(edits)} track-uri.")
+            win.destroy()
+
+        ttk.Button(win, text="Aplica pe cele selectate", command=apply_selected).pack(pady=8)
+
     def _build_tab_about(self):
         outer = ttk.Frame(self.tab_about)
         outer.pack(fill="both", expand=True)
@@ -643,17 +944,18 @@ class SeratoMigratorApp:
         self._refresh_crates_tree()
         self._refresh_migrate_checkboxes()
         self._refresh_orphan_lib_choices()
+        self._refresh_metadata_lib_choices()
 
     def _check_missing_elsewhere(self):
         sel = self.libs_tree.selection()
         if not sel:
-            messagebox.showwarning(APP_TITLE, "Selecteaza mai intai o biblioteca din lista de mai sus.")
+            show_warning(self.root, APP_TITLE, "Selecteaza mai intai o biblioteca din lista de mai sus.")
             return
         lib = next((l for l in self.libraries if l.name == sel[0]), None)
         if not lib:
             return
         if not lib.missing_tracks:
-            messagebox.showinfo(APP_TITLE, f"'{lib.name}' nu are track-uri lipsa.")
+            show_info(self.root, APP_TITLE, f"'{lib.name}' nu are track-uri lipsa.")
             return
 
         self.log(f"Caut pe tot volumul {lib.volume_root} cele "
@@ -860,7 +1162,7 @@ class SeratoMigratorApp:
     def _scan_orphans(self):
         root_path = self.orphan_root_var.get().strip()
         if not root_path:
-            messagebox.showwarning(APP_TITLE, "Alege mai intai un folder de scanat.")
+            show_warning(self.root, APP_TITLE, "Alege mai intai un folder de scanat.")
             return
 
         known: set[str] = set()
@@ -987,11 +1289,11 @@ class SeratoMigratorApp:
     def _preview_migration(self):
         dest = self.dest_var.get().strip()
         if not dest:
-            messagebox.showwarning(APP_TITLE, "Alege mai intai folderul destinatie.")
+            show_warning(self.root, APP_TITLE, "Alege mai intai folderul destinatie.")
             return
         libs = self._selected_libraries()
         if not libs:
-            messagebox.showwarning(APP_TITLE, "Bifeaza cel putin o biblioteca.")
+            show_warning(self.root, APP_TITLE, "Bifeaza cel putin o biblioteca.")
             return
 
         self.set_status("Calculez planul de copiere...")
@@ -1028,8 +1330,8 @@ class SeratoMigratorApp:
         copy_serato = self.copy_serato_var.get()
         selected_libs = self._selected_libraries()
         if copy_serato and len(selected_libs) != 1:
-            messagebox.showwarning(
-                APP_TITLE,
+            show_warning(
+                self.root, APP_TITLE,
                 "Copierea folderului _Serato_ functioneaza doar cu exact o biblioteca bifata "
                 "(fiecare biblioteca are propria baza de date - nu are sens sa le amestecam).\n\n"
                 "Debifeaza 'Copiaza si folderul _Serato_' sau bifeaza o singura biblioteca.")
@@ -1045,8 +1347,8 @@ class SeratoMigratorApp:
             extra_msg += ("\n\nCopia bazei de date va fi rescrisa cu noile cai - Serato va vedea "
                           "track-urile direct, fara 'Locate Missing Files'. Originalul NU e atins.")
 
-        if not messagebox.askyesno(
-            APP_TITLE,
+        if not ask_yesno(
+            self.root, APP_TITLE,
             f"Se vor copia {self._plan.primary_count} fisiere "
             f"({_human_size(self._plan.total_bytes)}) plus {self._plan.link_count} hard link-uri."
             f"{extra_msg}\n\nFisierele originale NU sunt sterse. Continui?",
@@ -1083,7 +1385,7 @@ class SeratoMigratorApp:
                 if item is None:
                     self.set_status("Copiere terminata.")
                     self.log("Copiere terminata.")
-                    messagebox.showinfo(APP_TITLE, "Copierea s-a terminat.")
+                    show_info(self.root, APP_TITLE, "Copierea s-a terminat.")
                     self.copy_btn["state"] = "normal"
                     return
                 if item[0] == "serato_start":

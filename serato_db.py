@@ -140,6 +140,7 @@ def parse_database(db_path: str | Path, volume_root: str = "/") -> dict[str, Tra
             title=_get(value, "tsng"),
             artist=_get(value, "tart"),
             album=_get(value, "talb"),
+            genre=_get(value, "tgen"),
             file_type=_get(value, "ttyp"),
             size=_get(value, "tsiz"),
         )
