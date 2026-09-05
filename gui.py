@@ -1,0 +1,1141 @@
+"""Interfata grafica (Tkinter) pentru Serato Migrator."""
+from __future__ import annotations
+
+import queue
+import threading
+import time
+import tkinter.font as tkfont
+from pathlib import Path
+from tkinter import (
+    Tk, Canvas, PhotoImage, Text, StringVar, BooleanVar, Toplevel, N, S, E, W, END, HORIZONTAL,
+    filedialog, messagebox,
+)
+from tkinter import ttk
+
+import scanner
+import copier
+
+APP_TITLE = "Serato Migrator"
+
+BASE_FONT_SIZE = 14
+MONO_FONT_SIZE = 13
+
+# paleta moderna - albastrul e ales din mijlocul degradeului violet->turcoaz al logo-ului
+ACCENT = "#3B8FDA"
+ACCENT_DARK = "#327AB9"
+ACCENT_2 = "#00CEC9"
+APP_BG = "#E7E7ED"
+SURFACE = "#FFFFFF"
+BORDER = "#E3E3EA"
+TEXT_MAIN = "#1C1C1E"
+TEXT_MUTED = "#6E6E76"
+DISABLED_BG = "#D8D8DE"
+
+SPLASH_BG = "#14161a"
+SPLASH_ACCENT = "#ff5a1f"
+SPLASH_DURATION_MS = 3200
+
+# logo modern: patrat rotunjit cu degrade + bare de equalizer
+LOGO_GRAD_START = "#6C5CE7"   # violet
+LOGO_GRAD_END = "#00CEC9"    # turcoaz
+LOGO_BAR_HEIGHTS = (0.42, 0.68, 1.0, 0.55)
+
+
+def _hex_lerp(c1: str, c2: str, t: float) -> str:
+    r1, g1, b1 = int(c1[1:3], 16), int(c1[3:5], 16), int(c1[5:7], 16)
+    r2, g2, b2 = int(c2[1:3], 16), int(c2[3:5], 16), int(c2[5:7], 16)
+    r = round(r1 + (r2 - r1) * t)
+    g = round(g1 + (g2 - g1) * t)
+    b = round(b1 + (b2 - b1) * t)
+    return f"#{r:02x}{g:02x}{b:02x}"
+
+
+def _inside_rounded_square(x: float, y: float, size: int, r: float) -> bool:
+    if x < r and y < r:
+        return (x - r) ** 2 + (y - r) ** 2 <= r * r
+    if x > size - r and y < r:
+        return (x - (size - r)) ** 2 + (y - r) ** 2 <= r * r
+    if x < r and y > size - r:
+        return (x - r) ** 2 + (y - (size - r)) ** 2 <= r * r
+    if x > size - r and y > size - r:
+        return (x - (size - r)) ** 2 + (y - (size - r)) ** 2 <= r * r
+    return 0 <= x <= size and 0 <= y <= size
+
+
+def _draw_logo_bars_on_canvas(canvas: Canvas, cx: int, cy: int, box: int):
+    """Deseneaza marca (barele de equalizer) pe un canvas, direct pe fundalul existent."""
+    n = len(LOGO_BAR_HEIGHTS)
+    bar_w = box * 0.16
+    gap = box * 0.08
+    total_w = n * bar_w + (n - 1) * gap
+    start_x = cx - total_w / 2
+    max_h = box
+    base_y = cy + box / 2
+    for i, frac in enumerate(LOGO_BAR_HEIGHTS):
+        color = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, i / (n - 1))
+        x0 = start_x + i * (bar_w + gap)
+        x1 = x0 + bar_w
+        h = max_h * frac
+        y0 = base_y - h
+        radius = bar_w / 2
+        canvas.create_rectangle(x0, y0 + radius, x1, base_y, fill=color, outline="")
+        canvas.create_oval(x0, y0, x1, y0 + 2 * radius, fill=color, outline="")
+
+
+def _build_app_icon(size: int = 128) -> PhotoImage:
+    """Deseneaza programatic o iconita moderna (patrat rotunjit, degrade + bare) - fara logo extern."""
+    img = PhotoImage(width=size, height=size)
+    radius = size * 0.22
+
+    n = len(LOGO_BAR_HEIGHTS)
+    bar_w = size * 0.11
+    gap = size * 0.055
+    total_w = n * bar_w + (n - 1) * gap
+    start_x = (size - total_w) / 2
+    max_bar_h = size * 0.46
+    base_y = size * 0.72
+
+    bars = []
+    for i, frac in enumerate(LOGO_BAR_HEIGHTS):
+        x0 = start_x + i * (bar_w + gap)
+        x1 = x0 + bar_w
+        h = max_bar_h * frac
+        bars.append((x0, x1, base_y - h, base_y))
+
+    rows = []
+    transparent_px = []
+    for y in range(size):
+        colors = []
+        for x in range(size):
+            xf, yf = x + 0.5, y + 0.5
+            if not _inside_rounded_square(xf, yf, size, radius):
+                colors.append(SPLASH_BG)
+                transparent_px.append((x, y))
+                continue
+            t = (x + y) / (2 * size)
+            bg = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, t)
+            in_bar = any(x0 <= x < x1 and y0 <= y <= y1 for x0, x1, y0, y1 in bars)
+            colors.append("#ffffff" if in_bar else bg)
+        rows.append("{" + " ".join(colors) + "}")
+    img.put(" ".join(rows))
+    for x, y in transparent_px:
+        img.transparency_set(x, y, True)
+    return img
+
+
+def _inside_rounded_rect(x: float, y: float, w: int, h: int, r: float) -> bool:
+    if x < r and y < r:
+        return (x - r) ** 2 + (y - r) ** 2 <= r * r
+    if x > w - r and y < r:
+        return (x - (w - r)) ** 2 + (y - r) ** 2 <= r * r
+    if x < r and y > h - r:
+        return (x - r) ** 2 + (y - (h - r)) ** 2 <= r * r
+    if x > w - r and y > h - r:
+        return (x - (w - r)) ** 2 + (y - (h - r)) ** 2 <= r * r
+    return 0 <= x <= w and 0 <= y <= h
+
+
+def _build_pill_image(width: int, height: int, color: str, radius: float | None = None) -> PhotoImage:
+    """Dreptunghi complet rotunjit (capsula), umplut cu `color`, restul transparent."""
+    if radius is None:
+        radius = height / 2
+    img = PhotoImage(width=width, height=height)
+    rows = []
+    transparent_px = []
+    for y in range(height):
+        colors = []
+        for x in range(width):
+            if _inside_rounded_rect(x + 0.5, y + 0.5, width, height, radius):
+                colors.append(color)
+            else:
+                colors.append("#000000")
+                transparent_px.append((x, y))
+        rows.append("{" + " ".join(colors) + "}")
+    img.put(" ".join(rows))
+    for x, y in transparent_px:
+        img.transparency_set(x, y, True)
+    return img
+
+
+def _new_blank_image(size: int) -> tuple[PhotoImage, list]:
+    """Creaza o imagine size x size, complet transparenta, gata de desenat pe ea."""
+    img = PhotoImage(width=size, height=size)
+    px = [["#000000"] * size for _ in range(size)]
+    return img, px
+
+
+def _flush_image(img: PhotoImage, px: list, transparent_default="#000000"):
+    rows = ["{" + " ".join(row) + "}" for row in px]
+    img.put(" ".join(rows))
+    size = len(px)
+    for y in range(size):
+        for x in range(size):
+            if px[y][x] == transparent_default:
+                img.transparency_set(x, y, True)
+
+
+def _dist_to_segment(px_, py_, x0, y0, x1, y1) -> float:
+    dx, dy = x1 - x0, y1 - y0
+    length_sq = dx * dx + dy * dy
+    if length_sq == 0:
+        return ((px_ - x0) ** 2 + (py_ - y0) ** 2) ** 0.5
+    t = max(0.0, min(1.0, ((px_ - x0) * dx + (py_ - y0) * dy) / length_sq))
+    projx, projy = x0 + t * dx, y0 + t * dy
+    return ((px_ - projx) ** 2 + (py_ - projy) ** 2) ** 0.5
+
+
+def _point_in_triangle(px_, py_, ax, ay, bx, by, cx_, cy_) -> bool:
+    def sign(x1, y1, x2, y2, x3, y3):
+        return (x1 - x3) * (y2 - y3) - (x2 - x3) * (y1 - y3)
+    d1 = sign(px_, py_, ax, ay, bx, by)
+    d2 = sign(px_, py_, bx, by, cx_, cy_)
+    d3 = sign(px_, py_, cx_, cy_, ax, ay)
+    has_neg = d1 < 0 or d2 < 0 or d3 < 0
+    has_pos = d1 > 0 or d2 > 0 or d3 > 0
+    return not (has_neg and has_pos)
+
+
+def _build_refresh_icon(size: int = 28) -> PhotoImage:
+    """Sageata circulara (rescanare) - degrade ca la logo."""
+    import math
+    img, px = _new_blank_image(size)
+    cx = cy = size / 2
+    r = size * 0.30
+    thickness = max(2.0, size * 0.13)
+    gap_deg = 60
+    start_a = 90 + gap_deg / 2
+    end_a = start_a + (360 - gap_deg)
+
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x - cx + 0.5, y - cy + 0.5
+            d = (dx * dx + dy * dy) ** 0.5
+            if abs(d - r) <= thickness / 2:
+                ang = math.degrees(math.atan2(-dy, dx))
+                if ang < start_a:
+                    ang += 360
+                if start_a <= ang <= end_a:
+                    t = (ang - start_a) / (end_a - start_a)
+                    px[y][x] = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, t)
+
+    end_rad = math.radians(end_a % 360)
+    tip = (cx + r * math.cos(end_rad), cy - r * math.sin(end_rad))
+    tangent_rad = end_rad - math.pi / 2
+    head_len = size * 0.24
+    head_w = size * 0.16
+    base_x = tip[0] - head_len * math.cos(tangent_rad)
+    base_y = tip[1] + head_len * math.sin(tangent_rad)
+    perp_rad = tangent_rad + math.pi / 2
+    p1 = tip
+    p2 = (base_x + head_w * math.cos(perp_rad), base_y - head_w * math.sin(perp_rad))
+    p3 = (base_x - head_w * math.cos(perp_rad), base_y + head_w * math.sin(perp_rad))
+    end_color = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, 1.0)
+    for y in range(size):
+        for x in range(size):
+            if _point_in_triangle(x + 0.5, y + 0.5, *p1, *p2, *p3):
+                px[y][x] = end_color
+
+    _flush_image(img, px)
+    return img
+
+
+def _build_locate_icon(size: int = 28) -> PhotoImage:
+    """Crosshair/radar (localizare track-uri mutate) - degrade ca la logo."""
+    img, px = _new_blank_image(size)
+    cx = cy = size / 2
+    outer_r = size * 0.34
+    inner_r = size * 0.09
+    thickness = max(1.6, size * 0.09)
+    tick_gap = size * 0.05
+    tick_len = size * 0.13
+
+    for y in range(size):
+        for x in range(size):
+            dx, dy = x - cx + 0.5, y - cy + 0.5
+            d = (dx * dx + dy * dy) ** 0.5
+            t = max(0.0, min(1.0, d / outer_r))
+            if abs(d - outer_r) < thickness / 2:
+                px[y][x] = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, t)
+            elif d <= inner_r:
+                px[y][x] = LOGO_GRAD_START
+
+    for tdx, tdy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+        x0 = cx + tdx * (outer_r + tick_gap)
+        y0 = cy + tdy * (outer_r + tick_gap)
+        x1 = cx + tdx * (outer_r + tick_gap + tick_len)
+        y1 = cy + tdy * (outer_r + tick_gap + tick_len)
+        for y in range(size):
+            for x in range(size):
+                if _dist_to_segment(x, y, x0, y0, x1, y1) < thickness / 2:
+                    px[y][x] = _hex_lerp(LOGO_GRAD_START, LOGO_GRAD_END, 0.5)
+
+    _flush_image(img, px)
+    return img
+
+
+def _build_dot_icon(size: int = 13, filled: bool = False, color: str = TEXT_MUTED) -> PhotoImage:
+    """Punct folosit ca indicator de expand/collapse in arbori, in loc de sageata clasica."""
+    img, px = _new_blank_image(size)
+    cx = cy = size / 2
+    r = size * 0.30
+    for y in range(size):
+        for x in range(size):
+            d = ((x - cx + 0.5) ** 2 + (y - cy + 0.5) ** 2) ** 0.5
+            if filled and d <= r:
+                px[y][x] = color
+            elif not filled and abs(d - r) < 1.0:
+                px[y][x] = color
+    _flush_image(img, px)
+    return img
+
+
+class _Tooltip:
+    """Tooltip simplu: apare la hover peste un widget, dupa o mica intarziere."""
+
+    def __init__(self, widget, text: str, delay_ms: int = 400):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self._after_id = None
+        self._tip = None
+        widget.bind("<Enter>", self._schedule)
+        widget.bind("<Leave>", self._hide)
+        widget.bind("<ButtonPress>", self._hide)
+
+    def _schedule(self, _event=None):
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _show(self):
+        if self._tip is not None:
+            return
+        x = self.widget.winfo_rootx() + self.widget.winfo_width() // 2
+        y = self.widget.winfo_rooty() + self.widget.winfo_height() + 6
+        self._tip = Toplevel(self.widget)
+        self._tip.overrideredirect(True)
+        self._tip.attributes("-topmost", True)
+        label = ttk.Label(self._tip, text=self.text, background="#2b2d33", foreground="white",
+                           padding=(8, 4), font=(None, BASE_FONT_SIZE - 2))
+        label.pack()
+        self._tip.update_idletasks()
+        tip_w = self._tip.winfo_width()
+        self._tip.geometry(f"+{x - tip_w // 2}+{y}")
+
+    def _hide(self, _event=None):
+        if self._after_id is not None:
+            self.widget.after_cancel(self._after_id)
+            self._after_id = None
+        if self._tip is not None:
+            self._tip.destroy()
+            self._tip = None
+
+
+def _show_splash(root: Tk, on_done):
+    splash = Toplevel(root)
+    splash.overrideredirect(True)
+    splash.configure(bg=SPLASH_BG)
+    w, h = 420, 420
+    sw, sh = splash.winfo_screenwidth(), splash.winfo_screenheight()
+    splash.geometry(f"{w}x{h}+{(sw - w) // 2}+{(sh - h) // 2}")
+    splash.attributes("-topmost", True)
+
+    canvas = Canvas(splash, width=w, height=h, bg=SPLASH_BG, highlightthickness=0)
+    canvas.pack(fill="both", expand=True)
+    _draw_logo_bars_on_canvas(canvas, w // 2, 150, 140)
+
+    canvas.create_text(w // 2, 275, text="SERATO MIGRATOR", fill="white",
+                        font=("Helvetica", 20, "bold"))
+    canvas.create_text(w // 2, 305, text="Verifica, organizeaza si muta biblioteca ta Serato",
+                        fill="#8a8f98", font=("Helvetica", 11))
+    canvas.create_text(w // 2, 355, text="Se pregateste biblioteca...", fill="#c8ccd2",
+                        font=("Helvetica", 12))
+
+    splash.update_idletasks()
+    splash.update()
+    root.after(SPLASH_DURATION_MS, lambda: (splash.destroy(), on_done()))
+
+
+class SeratoMigratorApp:
+    def __init__(self, root: Tk):
+        self.root = root
+        self.root.title(APP_TITLE)
+        self.root.geometry("1300x800")
+        self.root.minsize(1000, 650)
+
+        self._setup_fonts()
+
+        self.libraries: list[scanner.SeratoLibrary] = []
+        self.lib_vars: dict[str, BooleanVar] = {}   # nume biblioteca -> checkbox inclus in migrare
+
+        self._build_ui()
+        self.refresh_libraries()
+
+    def _setup_fonts(self):
+        for name in ("TkDefaultFont", "TkTextFont", "TkMenuFont", "TkHeadingFont"):
+            f = tkfont.nametofont(name)
+            f.configure(size=BASE_FONT_SIZE)
+        self.mono_font = tkfont.Font(family="Menlo", size=MONO_FONT_SIZE)
+
+        self.root.configure(bg=APP_BG)
+        style = ttk.Style()
+        try:
+            style.theme_use("clam")
+        except Exception:
+            pass
+
+        style.configure(".", background=APP_BG, foreground=TEXT_MAIN, font=(None, BASE_FONT_SIZE))
+        style.configure("TFrame", background=APP_BG)
+        style.configure("TLabel", background=APP_BG, foreground=TEXT_MAIN, font=(None, BASE_FONT_SIZE))
+        style.configure("TCheckbutton", background=APP_BG, font=(None, BASE_FONT_SIZE))
+
+        style.configure("TButton", font=(None, BASE_FONT_SIZE), padding=8,
+                         background=ACCENT, foreground="white", borderwidth=0, focusthickness=0)
+        style.map("TButton",
+                  background=[("active", ACCENT_DARK), ("disabled", DISABLED_BG)],
+                  foreground=[("disabled", TEXT_MUTED)])
+
+        style.configure("Icon.TButton", padding=6, background=APP_BG, borderwidth=0, relief="flat")
+        style.map("Icon.TButton", background=[("active", BORDER)])
+
+        style.configure("TNotebook", background=APP_BG, borderwidth=0)
+        style.configure("TNotebook.Tab", background=APP_BG, foreground=TEXT_MUTED,
+                         padding=(16, 10), font=(None, BASE_FONT_SIZE))
+        style.map("TNotebook.Tab",
+                  background=[("selected", SURFACE)],
+                  foreground=[("selected", ACCENT)])
+
+        style.configure("Treeview", rowheight=32, font=(None, BASE_FONT_SIZE),
+                         background=SURFACE, fieldbackground=SURFACE, foreground=TEXT_MAIN,
+                         borderwidth=0)
+        style.configure("Treeview.Heading", font=(None, BASE_FONT_SIZE, "bold"),
+                         background=APP_BG, foreground=TEXT_MUTED, relief="flat")
+        style.map("Treeview", background=[("selected", ACCENT)], foreground=[("selected", "white")])
+
+        style.configure("TLabelframe", background=APP_BG, bordercolor=BORDER)
+        style.configure("TLabelframe.Label", font=(None, BASE_FONT_SIZE, "bold"),
+                         background=APP_BG, foreground=TEXT_MUTED)
+        style.configure("Status.TLabel", font=(None, BASE_FONT_SIZE), padding=6,
+                         background=SURFACE, foreground=TEXT_MUTED)
+
+        style.configure("TCombobox", fieldbackground=SURFACE, background=SURFACE)
+        style.configure("TEntry", fieldbackground=SURFACE)
+
+        self._setup_dot_indicator(style)
+
+    def _setup_dot_indicator(self, style: ttk.Style):
+        """Inlocuieste sageata clasica de expand/collapse din Treeview cu un punct."""
+        self._dot_closed_img = _build_dot_icon(filled=False)
+        self._dot_open_img = _build_dot_icon(filled=True, color=ACCENT)
+        self._dot_empty_img, _ = _new_blank_image(13)
+        _flush_image(self._dot_empty_img, [["#000000"] * 13 for _ in range(13)])
+
+        style.element_create(
+            "Dot.Treeitem.indicator", "image", self._dot_closed_img,
+            ("user1", "!user2", self._dot_open_img),
+            ("user2", self._dot_empty_img),
+            sticky="w", width=20,
+        )
+        style.layout("Treeview.Item", [
+            ("Treeitem.padding", {"sticky": "nswe", "children": [
+                ("Dot.Treeitem.indicator", {"side": "left", "sticky": ""}),
+                ("Treeitem.image", {"side": "left", "sticky": ""}),
+                ("Treeitem.text", {"side": "left", "sticky": ""}),
+            ]}),
+        ])
+
+    # ---------------------------------------------------------- UI generala
+    def _build_ui(self):
+        style = ttk.Style()
+        style.configure("TabItem.TLabel", background=APP_BG, foreground=TEXT_MUTED,
+                         font=(None, BASE_FONT_SIZE), padding=(14, 8))
+
+        bar_inner = ttk.Frame(self.root)
+        bar_inner.pack(anchor="w", padx=16, pady=(14, 10))
+
+        divider = ttk.Frame(self.root, height=1, style="Divider.TFrame")
+        style.configure("Divider.TFrame", background=BORDER)
+        divider.pack(fill="x", padx=16)
+
+        content = ttk.Frame(self.root)
+        content.pack(fill="both", expand=True, padx=16, pady=14)
+        content.grid_rowconfigure(0, weight=1)
+        content.grid_columnconfigure(0, weight=1)
+
+        self.tab_libs = ttk.Frame(content)
+        self.tab_crates = ttk.Frame(content)
+        self.tab_orphans = ttk.Frame(content)
+        self.tab_migrate = ttk.Frame(content)
+        self.tab_log = ttk.Frame(content)
+        self.tab_about = ttk.Frame(content)
+
+        tabs = [
+            ("libs", "Biblioteci", self.tab_libs),
+            ("crates", "Crate-uri", self.tab_crates),
+            ("orphans", "Fisiere orfane", self.tab_orphans),
+            ("migrate", "Migrare / Reorganizare", self.tab_migrate),
+            ("log", "Jurnal", self.tab_log),
+            ("about", "Despre", self.tab_about),
+        ]
+        self._tab_frames: dict[str, ttk.Frame] = {}
+        self._tab_labels: dict[str, ttk.Label] = {}
+        self._tab_pill_cache: dict[str, PhotoImage] = {}
+        self._active_tab = None
+
+        for key, title, frame in tabs:
+            self._tab_frames[key] = frame
+            frame.grid(row=0, column=0, sticky="nsew")
+
+            lbl = ttk.Label(bar_inner, text=title, style="TabItem.TLabel", cursor="pointinghand")
+            lbl.pack(side="left", padx=2)
+            lbl.bind("<Button-1>", lambda _e, k=key: self._select_tab(k))
+            self._tab_labels[key] = lbl
+
+        self._build_tab_log()   # inainte de celelalte, ca self.log() sa fie disponibil de la inceput
+        self._build_tab_libraries()
+        self._build_tab_crates()
+        self._build_tab_orphans()
+        self._build_tab_migrate()
+        self._build_tab_about()
+
+        self._select_tab("libs")
+
+        self.status_var = StringVar(value="Gata.")
+        status_bar = ttk.Label(self.root, textvariable=self.status_var, anchor="w",
+                                style="Status.TLabel")
+        status_bar.pack(fill="x", side="bottom")
+
+    def _select_tab(self, key: str):
+        if self._active_tab == key:
+            return
+        self._active_tab = key
+        for k, lbl in self._tab_labels.items():
+            if k == key:
+                if k not in self._tab_pill_cache:
+                    fnt = tkfont.Font(font=lbl.cget("font"))
+                    text_w = fnt.measure(lbl.cget("text"))
+                    pill_w = text_w + 36
+                    pill_h = 32
+                    self._tab_pill_cache[k] = _build_pill_image(pill_w, pill_h, SURFACE)
+                lbl.configure(image=self._tab_pill_cache[k], compound="center",
+                               foreground=ACCENT, font=(None, BASE_FONT_SIZE, "bold"))
+            else:
+                lbl.configure(image="", compound="none",
+                               foreground=TEXT_MUTED, font=(None, BASE_FONT_SIZE))
+        self._tab_frames[key].tkraise()
+
+    def set_status(self, text: str):
+        self.status_var.set(text)
+
+    # ---------------------------------------------------------- Tab Jurnal
+    def _build_tab_log(self):
+        top = ttk.Frame(self.tab_log)
+        top.pack(fill="x", pady=6)
+        ttk.Label(top, text="Jurnal de activitate - tot ce face aplicatia apare aici, in timp real.").pack(
+            side="left")
+        ttk.Button(top, text="Curata jurnalul", command=self._clear_log).pack(side="right", padx=4)
+
+        self.log_text = Text(self.tab_log, font=self.mono_font, wrap="word", state="disabled")
+        scroll = ttk.Scrollbar(self.tab_log, orient="vertical", command=self.log_text.yview)
+        self.log_text.configure(yscrollcommand=scroll.set)
+        self.log_text.pack(side="left", fill="both", expand=True, padx=(4, 0), pady=4)
+        scroll.pack(side="right", fill="y", pady=4)
+
+    def log(self, message: str):
+        timestamp = time.strftime("%H:%M:%S")
+        self.log_text.configure(state="normal")
+        self.log_text.insert(END, f"[{timestamp}] {message}\n")
+        self.log_text.see(END)
+        self.log_text.configure(state="disabled")
+
+    def _clear_log(self):
+        self.log_text.configure(state="normal")
+        self.log_text.delete("1.0", END)
+        self.log_text.configure(state="disabled")
+
+    # ---------------------------------------------------------- Tab Despre
+    def _build_tab_about(self):
+        outer = ttk.Frame(self.tab_about)
+        outer.pack(fill="both", expand=True)
+        frame = ttk.Frame(outer, padding=30)
+        frame.place(relx=0.5, rely=0.5, anchor="center")
+
+        ttk.Label(frame, text="Serato Migrator", font=(None, 22, "bold"),
+                  justify="center", anchor="center").pack(pady=(0, 4))
+        ttk.Label(frame, text="Unealta personala pentru administrarea bibliotecii Serato DJ Pro.",
+                  font=(None, BASE_FONT_SIZE), justify="center", anchor="center").pack(pady=(0, 16))
+
+        info_lines = [
+            "Dezvoltata de Gabriel Colceriu, cu asistenta Claude Code (Anthropic).",
+            "",
+            "Ce face aplicatia:",
+            "Biblioteci: detecteaza automat bibliotecile Serato (locala + volume externe)",
+            "Crate-uri: navigheaza arborele de crate-uri si vezi ce track-uri lipsesc de pe disk",
+            "Fisiere orfane: gaseste fisiere audio de pe disk necunoscute de Serato",
+            "Migrare / Reorganizare: copiaza track-urile in foldere numite dupa crate-uri,"
+            " pe o destinatie noua, fara sa stearga originalele",
+            "Jurnal: istoricul tuturor operatiilor facute de aplicatie",
+            "",
+            "Acest program este neoficial si nu este afiliat cu Serato Audio Research.",
+            "'Serato' este marca inregistrata a detinatorilor ei.",
+        ]
+        for line in info_lines:
+            ttk.Label(frame, text=line, font=(None, BASE_FONT_SIZE - 1),
+                      justify="center", anchor="center").pack(fill="x")
+
+    # ---------------------------------------------------------- Tab Biblioteci
+    def _build_tab_libraries(self):
+        top = ttk.Frame(self.tab_libs)
+        top.pack(fill="x", pady=6)
+
+        self._icon_refresh = _build_refresh_icon()
+        self._icon_check = _build_locate_icon()
+
+        refresh_btn = ttk.Button(top, image=self._icon_refresh, style="Icon.TButton",
+                                  command=self.refresh_libraries)
+        refresh_btn.pack(side="left", padx=(4, 2))
+        _Tooltip(refresh_btn, "Rescaneaza bibliotecile Serato")
+
+        self.check_missing_btn = ttk.Button(top, image=self._icon_check, style="Icon.TButton",
+                                             command=self._check_missing_elsewhere)
+        self.check_missing_btn.pack(side="left", padx=2)
+        _Tooltip(self.check_missing_btn, "Verifica track-uri lipsa (cauta pe disk daca au fost mutate)")
+
+        cols = ("nume", "radacina", "tracks", "prezente", "lipsa", "crate_uri")
+        self.libs_tree = ttk.Treeview(self.tab_libs, columns=cols, show="headings", height=10)
+        headings = {
+            "nume": "Biblioteca", "radacina": "Radacina volum", "tracks": "Track-uri",
+            "prezente": "Prezente", "lipsa": "Lipsa", "crate_uri": "Crate-uri",
+        }
+        for c in cols:
+            self.libs_tree.heading(c, text=headings[c])
+            self.libs_tree.column(c, width=140, anchor="center")
+        self.libs_tree.column("radacina", width=220, anchor="w")
+        self.libs_tree.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def refresh_libraries(self):
+        self.set_status("Scanez bibliotecile Serato...")
+        self.log("Scanez bibliotecile Serato (locala + volume externe montate)...")
+        t0 = time.time()
+
+        def work():
+            libs = scanner.find_serato_libraries()
+            elapsed = time.time() - t0
+            self.root.after(0, lambda: self._on_libraries_scanned(libs, elapsed))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_libraries_scanned(self, libs: list[scanner.SeratoLibrary], elapsed: float):
+        self.libraries = libs
+        for row in self.libs_tree.get_children():
+            self.libs_tree.delete(row)
+        for lib in libs:
+            self.libs_tree.insert("", END, iid=lib.name, values=(
+                lib.name, lib.volume_root, len(lib.tracks),
+                len(lib.present_tracks), len(lib.missing_tracks), len(lib.crates),
+            ))
+        result_text = _ro_count(len(libs), "biblioteca gasita", "biblioteci gasite")
+        self.set_status(result_text + ".")
+        self.log(f"{result_text} in {elapsed:.1f}s: " +
+                 ", ".join(f"{lib.name} ({len(lib.tracks)} track-uri, {len(lib.missing_tracks)} lipsa)"
+                           for lib in libs))
+        self._refresh_crates_tree()
+        self._refresh_migrate_checkboxes()
+        self._refresh_orphan_lib_choices()
+
+    def _check_missing_elsewhere(self):
+        sel = self.libs_tree.selection()
+        if not sel:
+            messagebox.showwarning(APP_TITLE, "Selecteaza mai intai o biblioteca din lista de mai sus.")
+            return
+        lib = next((l for l in self.libraries if l.name == sel[0]), None)
+        if not lib:
+            return
+        if not lib.missing_tracks:
+            messagebox.showinfo(APP_TITLE, f"'{lib.name}' nu are track-uri lipsa.")
+            return
+
+        self.log(f"Caut pe tot volumul {lib.volume_root} cele "
+                 f"{_ro_count(len(lib.missing_tracks), 'track lipsa', 'track-uri lipsa')} din '{lib.name}'"
+                 f" (indexez toate fisierele audio de pe disk, poate dura cateva zeci de secunde)...")
+        self.check_missing_btn["state"] = "disabled"
+        t0 = time.time()
+        progress_q: queue.Queue = queue.Queue()
+
+        def progress_cb(count):
+            progress_q.put(count)
+
+        def work():
+            found, still_missing = scanner.find_missing_elsewhere(lib, progress_cb=progress_cb)
+            elapsed = time.time() - t0
+            progress_q.put(None)
+            self.root.after(0, lambda: self._show_missing_results(lib, found, still_missing, elapsed))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(200, lambda: self._poll_missing_progress(progress_q, t0))
+
+    def _poll_missing_progress(self, progress_q: queue.Queue, t0: float):
+        last = None
+        try:
+            while True:
+                item = progress_q.get_nowait()
+                if item is None:
+                    return  # rezultatul final vine separat prin _show_missing_results
+                last = item
+        except queue.Empty:
+            pass
+        if last is not None:
+            elapsed = time.time() - t0
+            self.set_status(f"Indexez fisierele de pe disk... {last} fisiere scanate ({elapsed:.0f}s)")
+        self.root.after(400, lambda: self._poll_missing_progress(progress_q, t0))
+
+    def _show_missing_results(self, lib: scanner.SeratoLibrary, found, still_missing, elapsed: float):
+        self.check_missing_btn["state"] = "normal"
+        self.set_status("Verificare terminata.")
+        self.log(f"Verificare terminata in {elapsed:.1f}s pentru '{lib.name}': "
+                 f"{_ro_count(len(found), 'gasit in alta parte', 'gasite in alta parte')}, "
+                 f"{_ro_count(len(still_missing), 'chiar lipsa', 'chiar lipsa')}.")
+
+        win = Toplevel(self.root)
+        win.title(f"Track-uri lipsa - {lib.name}")
+        win.geometry("1000x600")
+
+        summary = (
+            f"{_ro_count(len(found), 'track gasit in alta parte', 'track-uri gasite in alta parte')}   |   "
+            f"{_ro_count(len(still_missing), 'track chiar lipsa', 'track-uri chiar lipsa')}"
+        )
+        ttk.Label(win, text=summary, style="Status.TLabel").pack(fill="x")
+
+        notebook = ttk.Notebook(win)
+        notebook.pack(fill="both", expand=True, padx=6, pady=6)
+
+        found_tab = ttk.Frame(notebook)
+        missing_tab = ttk.Frame(notebook)
+        notebook.add(found_tab, text=f"Gasite in alta parte ({len(found)})")
+        notebook.add(missing_tab, text=f"Chiar lipsa ({len(still_missing)})")
+
+        found_tree = ttk.Treeview(found_tab, columns=("veche", "noua"), show="headings")
+        found_tree.heading("veche", text="Cale veche (in Serato)")
+        found_tree.heading("noua", text="Gasit acum la")
+        found_tree.column("veche", width=460, anchor="w")
+        found_tree.column("noua", width=460, anchor="w")
+        found_tree.pack(fill="both", expand=True)
+        for track, candidates in found:
+            for candidate in candidates:
+                found_tree.insert("", END, values=(track.abs_path, str(candidate)))
+
+        missing_list = ttk.Treeview(missing_tab, columns=("cale",), show="headings")
+        missing_list.heading("cale", text="Cale (negasita nicaieri pe disk)")
+        missing_list.column("cale", width=940, anchor="w")
+        missing_list.pack(fill="both", expand=True)
+        for track in still_missing:
+            missing_list.insert("", END, values=(track.abs_path,))
+
+    # ---------------------------------------------------------- Tab Crate-uri
+    def _build_tab_crates(self):
+        paned = ttk.Panedwindow(self.tab_crates, orient="horizontal")
+        paned.pack(fill="both", expand=True, padx=4, pady=4)
+
+        left = ttk.Frame(paned)
+        right = ttk.Frame(paned)
+        paned.add(left, weight=1)
+        paned.add(right, weight=2)
+
+        self.crates_tree = ttk.Treeview(left, show="tree")
+        self.crates_tree.pack(fill="both", expand=True)
+        self.crates_tree.bind("<<TreeviewSelect>>", self._on_crate_selected)
+
+        filter_bar = ttk.Frame(right)
+        filter_bar.pack(fill="x", pady=(0, 4))
+        ttk.Label(filter_bar, text="Arata:").pack(side="left", padx=(0, 6))
+        self.track_filter_var = StringVar(value="toate")
+        for value, label in (("toate", "Toate"), ("ok", "Doar OK"), ("lipsa", "Doar lipsa")):
+            ttk.Radiobutton(filter_bar, text=label, value=value, variable=self.track_filter_var,
+                             command=self._render_tracks_tree).pack(side="left", padx=4)
+
+        self._dot_green = _build_dot_icon(filled=True, color="#2ecc71")
+        self._dot_red = _build_dot_icon(filled=True, color="#e74c3c")
+
+        cols = ("artist", "titlu", "cale")
+        self.tracks_tree = ttk.Treeview(right, columns=cols, show="tree headings")
+        self.tracks_tree.heading("#0", text="Status")
+        self.tracks_tree.column("#0", width=60, anchor="center", stretch=False)
+        for c, w in zip(cols, (200, 200, 420)):
+            self.tracks_tree.heading(c, text=c.capitalize())
+            self.tracks_tree.column(c, width=w, anchor="w")
+        self.tracks_tree.pack(fill="both", expand=True)
+
+        # mapare: id nod tree -> (library, crate) sau None pt noduri intermediare
+        self._crate_node_map: dict[str, tuple[scanner.SeratoLibrary, object]] = {}
+        self._current_tracks_data: list[tuple[str, str, str, bool]] = []   # artist, titlu, cale, exista
+
+    def _refresh_crates_tree(self):
+        self.crates_tree.delete(*self.crates_tree.get_children())
+        self._crate_node_map.clear()
+
+        for lib in self.libraries:
+            lib_node = self.crates_tree.insert("", END, text=lib.name, open=False)
+            group_nodes: dict[tuple, str] = {}   # prefix hierarhie -> id nod
+
+            for crate in lib.crates:
+                parent = lib_node
+                prefix: tuple = ()
+                for depth, segment in enumerate(crate.hierarchy):
+                    prefix = crate.hierarchy[0] if depth == 0 else prefix
+                    key = (lib.name,) + tuple(crate.hierarchy[: depth + 1])
+                    if key not in group_nodes:
+                        node = self.crates_tree.insert(parent, END, text=segment, open=False)
+                        group_nodes[key] = node
+                    parent = group_nodes[key]
+                self._crate_node_map[parent] = (lib, crate)
+
+    def _on_crate_selected(self, _event):
+        sel = self.crates_tree.selection()
+        if not sel:
+            return
+        node = sel[0]
+        info = self._crate_node_map.get(node)
+        if not info:
+            self._current_tracks_data = []
+            self._render_tracks_tree()
+            return
+        lib, crate = info
+        data = []
+        for raw_path in crate.raw_paths:
+            abs_path = str(Path(lib.volume_root) / raw_path)
+            exists = Path(abs_path).exists()
+            track = lib.tracks.get(raw_path)
+            title = track.title if track else ""
+            artist = track.artist if track else ""
+            data.append((artist or "", title or "", abs_path, exists))
+        self._current_tracks_data = data
+        self._render_tracks_tree()
+
+    def _render_tracks_tree(self):
+        self.tracks_tree.delete(*self.tracks_tree.get_children())
+        filt = self.track_filter_var.get()
+        for artist, title, abs_path, exists in self._current_tracks_data:
+            if filt == "ok" and not exists:
+                continue
+            if filt == "lipsa" and exists:
+                continue
+            icon = self._dot_green if exists else self._dot_red
+            self.tracks_tree.insert("", END, image=icon, values=(artist, title, abs_path))
+
+    # ---------------------------------------------------------- Tab Orfane
+    def _build_tab_orphans(self):
+        top = ttk.Frame(self.tab_orphans)
+        top.pack(fill="x", pady=6)
+
+        ttk.Label(top, text="Scaneaza radacina:").pack(side="left")
+        self.orphan_root_var = StringVar()
+        self.orphan_combo = ttk.Combobox(top, textvariable=self.orphan_root_var, width=40, state="readonly")
+        self.orphan_combo.pack(side="left", padx=4)
+        ttk.Button(top, text="Alege folder...", command=self._browse_orphan_root).pack(side="left", padx=4)
+        self.scan_orphans_btn = ttk.Button(top, text="Scaneaza dupa orfane", command=self._scan_orphans)
+        self.scan_orphans_btn.pack(side="left", padx=10)
+
+        self.orphans_info_var = StringVar(value="")
+        ttk.Label(self.tab_orphans, textvariable=self.orphans_info_var).pack(fill="x", padx=4)
+
+        self.orphans_list = ttk.Treeview(self.tab_orphans, columns=("cale", "marime"), show="headings")
+        self.orphans_list.heading("cale", text="Cale")
+        self.orphans_list.heading("marime", text="Marime")
+        self.orphans_list.column("cale", width=700, anchor="w")
+        self.orphans_list.column("marime", width=100, anchor="e")
+        self.orphans_list.pack(fill="both", expand=True, padx=4, pady=4)
+
+    def _refresh_orphan_lib_choices(self):
+        roots = [lib.volume_root for lib in self.libraries]
+        self.orphan_combo["values"] = roots
+        if roots and not self.orphan_root_var.get():
+            self.orphan_root_var.set(roots[0])
+
+    def _browse_orphan_root(self):
+        folder = filedialog.askdirectory(title="Alege folderul de scanat")
+        if folder:
+            self.orphan_root_var.set(folder)
+
+    def _scan_orphans(self):
+        root_path = self.orphan_root_var.get().strip()
+        if not root_path:
+            messagebox.showwarning(APP_TITLE, "Alege mai intai un folder de scanat.")
+            return
+
+        known: set[str] = set()
+        for lib in self.libraries:
+            if lib.volume_root == root_path or root_path.startswith(lib.volume_root + "/"):
+                known.update(t.abs_path for t in lib.tracks.values())
+
+        self.log(f"Scanez {root_path} dupa fisiere orfane (necunoscute de Serato)...")
+        self.scan_orphans_btn["state"] = "disabled"
+        t0 = time.time()
+        progress_q: queue.Queue = queue.Queue()
+
+        def progress_cb(scanned, orphans_so_far):
+            progress_q.put((scanned, orphans_so_far))
+
+        def work():
+            orphans = scanner.find_orphan_files(root_path, known, progress_cb=progress_cb)
+            elapsed = time.time() - t0
+            progress_q.put(None)
+            self.root.after(0, lambda: self._on_orphans_found(orphans, elapsed))
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(200, lambda: self._poll_orphan_progress(progress_q))
+
+    def _poll_orphan_progress(self, progress_q: queue.Queue):
+        last = None
+        try:
+            while True:
+                item = progress_q.get_nowait()
+                if item is None:
+                    return
+                last = item
+        except queue.Empty:
+            pass
+        if last is not None:
+            scanned, orphans_so_far = last
+            self.set_status(f"Scanez... {scanned} fisiere verificate, {orphans_so_far} orfane pana acum.")
+        self.root.after(400, lambda: self._poll_orphan_progress(progress_q))
+
+    def _on_orphans_found(self, orphans: list[Path], elapsed: float):
+        self.scan_orphans_btn["state"] = "normal"
+        self.orphans_list.delete(*self.orphans_list.get_children())
+        total_bytes = 0
+        for p in orphans:
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            total_bytes += size
+            self.orphans_list.insert("", END, values=(str(p), _human_size(size)))
+        count_text = _ro_count(len(orphans), "fisier orfan gasit", "fisiere orfane gasite")
+        self.orphans_info_var.set(f"{count_text}, {_human_size(total_bytes)} total.")
+        self.set_status("Scanare orfane terminata.")
+        self.log(f"Scanare orfane terminata in {elapsed:.1f}s: {count_text}, {_human_size(total_bytes)} total.")
+
+    # ---------------------------------------------------------- Tab Migrare
+    def _build_tab_migrate(self):
+        top = ttk.Frame(self.tab_migrate)
+        top.pack(fill="x", pady=6)
+
+        self.migrate_checks_frame = ttk.LabelFrame(top, text="Biblioteci de inclus")
+        self.migrate_checks_frame.pack(side="left", fill="y", padx=4)
+
+        right = ttk.Frame(top)
+        right.pack(side="left", fill="both", expand=True, padx=10)
+
+        ttk.Label(right, text="Destinatie:").grid(row=0, column=0, sticky=W)
+        self.dest_var = StringVar()
+        ttk.Entry(right, textvariable=self.dest_var, width=50).grid(row=0, column=1, sticky=(E, W), padx=4)
+        ttk.Button(right, text="Alege...", command=self._browse_dest).grid(row=0, column=2)
+
+        self.copy_serato_var = BooleanVar(value=True)
+        self.copy_serato_check = ttk.Checkbutton(
+            right, text="Copiaza si folderul _Serato_ (baza de date + crate-urile) la radacina destinatiei",
+            variable=self.copy_serato_var)
+        self.copy_serato_check.grid(row=1, column=0, columnspan=3, sticky=W, pady=(6, 0))
+
+        self.rewrite_paths_var = BooleanVar(value=True)
+        ttk.Checkbutton(
+            right, text="Rescrie caile in copia bazei de date (Serato vede totul fara 'Locate Missing Files')",
+            variable=self.rewrite_paths_var).grid(row=2, column=0, columnspan=3, sticky=W)
+
+        self.normalize_names_var = BooleanVar(value=True)
+        ttk.Checkbutton(
+            right, text="Normalizeaza numele SCRISE COMPLET CU MAJUSCULE la Title Case normal",
+            variable=self.normalize_names_var).grid(row=3, column=0, columnspan=3, sticky=W)
+
+        btns = ttk.Frame(right)
+        btns.grid(row=4, column=0, columnspan=3, pady=10, sticky=W)
+        ttk.Button(btns, text="Previzualizare", command=self._preview_migration).pack(side="left")
+        self.copy_btn = ttk.Button(btns, text="Copiaza acum", command=self._run_migration, state="disabled")
+        self.copy_btn.pack(side="left", padx=6)
+
+        self.migrate_summary_var = StringVar(value="")
+        ttk.Label(self.tab_migrate, textvariable=self.migrate_summary_var, justify="left").pack(fill="x", padx=4)
+
+        self.progress = ttk.Progressbar(self.tab_migrate, orient=HORIZONTAL, mode="determinate")
+        self.progress.pack(fill="x", padx=4, pady=4)
+
+        ttk.Label(self.tab_migrate, text="Detaliile copierii apar in tabul 'Jurnal'.",
+                  font=(None, BASE_FONT_SIZE - 1)).pack(anchor=W, padx=4)
+
+        self._plan: copier.CopyPlan | None = None
+        self._progress_queue: queue.Queue = queue.Queue()
+
+    def _refresh_migrate_checkboxes(self):
+        for child in self.migrate_checks_frame.winfo_children():
+            child.destroy()
+        self.lib_vars.clear()
+        for lib in self.libraries:
+            var = BooleanVar(value=True)
+            self.lib_vars[lib.name] = var
+            ttk.Checkbutton(self.migrate_checks_frame, text=f"{lib.name} ({len(lib.tracks)} track-uri)",
+                             variable=var).pack(anchor=W, padx=4, pady=2)
+
+    def _browse_dest(self):
+        folder = filedialog.askdirectory(title="Alege folderul destinatie")
+        if folder:
+            self.dest_var.set(folder)
+
+    def _selected_libraries(self) -> list[scanner.SeratoLibrary]:
+        return [lib for lib in self.libraries if self.lib_vars.get(lib.name) and self.lib_vars[lib.name].get()]
+
+    def _preview_migration(self):
+        dest = self.dest_var.get().strip()
+        if not dest:
+            messagebox.showwarning(APP_TITLE, "Alege mai intai folderul destinatie.")
+            return
+        libs = self._selected_libraries()
+        if not libs:
+            messagebox.showwarning(APP_TITLE, "Bifeaza cel putin o biblioteca.")
+            return
+
+        self.set_status("Calculez planul de copiere...")
+        self.log(f"Calculez planul de copiere pentru {', '.join(l.name for l in libs)} -> {dest}...")
+
+        normalize_names = self.normalize_names_var.get()
+
+        def work():
+            plan = copier.plan_copy(libs, Path(dest), normalize_names=normalize_names)
+            self.root.after(0, lambda: self._on_plan_ready(plan))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _on_plan_ready(self, plan: copier.CopyPlan):
+        self._plan = plan
+        self.log(f"Plan gata: {plan.primary_count} copii, {plan.link_count} hardlink-uri, "
+                 f"{_human_size(plan.total_bytes)}, {len(plan.skipped_missing)} lipsa sarite.")
+        summary = (
+            f"Copii reale: {plan.primary_count}   |   "
+            f"Hard link-uri (duplicate, fara spatiu suplimentar): {plan.link_count}   |   "
+            f"Marime totala de copiat: {_human_size(plan.total_bytes)}   |   "
+            f"Track-uri lipsa (sarite): {len(plan.skipped_missing)}"
+        )
+        self.migrate_summary_var.set(summary)
+        self.progress["value"] = 0
+        self.progress["maximum"] = len(plan.operations)
+        self.copy_btn["state"] = "normal" if plan.operations else "disabled"
+        self.set_status("Plan gata. Verifica si apasa 'Copiaza acum'.")
+
+    def _run_migration(self):
+        if not self._plan or not self._plan.operations:
+            return
+
+        copy_serato = self.copy_serato_var.get()
+        selected_libs = self._selected_libraries()
+        if copy_serato and len(selected_libs) != 1:
+            messagebox.showwarning(
+                APP_TITLE,
+                "Copierea folderului _Serato_ functioneaza doar cu exact o biblioteca bifata "
+                "(fiecare biblioteca are propria baza de date - nu are sens sa le amestecam).\n\n"
+                "Debifeaza 'Copiaza si folderul _Serato_' sau bifeaza o singura biblioteca.")
+            return
+
+        rewrite_paths = self.rewrite_paths_var.get() and copy_serato
+
+        extra_msg = ""
+        if copy_serato:
+            extra_msg = (f"\n\nSe copiaza si folderul _Serato_ (baza de date + crate-urile) "
+                         f"al bibliotecii '{selected_libs[0].name}' la radacina destinatiei.")
+        if rewrite_paths:
+            extra_msg += ("\n\nCopia bazei de date va fi rescrisa cu noile cai - Serato va vedea "
+                          "track-urile direct, fara 'Locate Missing Files'. Originalul NU e atins.")
+
+        if not messagebox.askyesno(
+            APP_TITLE,
+            f"Se vor copia {self._plan.primary_count} fisiere "
+            f"({_human_size(self._plan.total_bytes)}) plus {self._plan.link_count} hard link-uri."
+            f"{extra_msg}\n\nFisierele originale NU sunt sterse. Continui?",
+        ):
+            return
+
+        self.copy_btn["state"] = "disabled"
+        self.log(f"Incep copierea: {self._plan.primary_count} fisiere, {_human_size(self._plan.total_bytes)}.")
+        plan = self._plan
+        dest_root = Path(self.dest_var.get().strip())
+
+        def progress_cb(done, total, op: copier.CopyOperation):
+            self._progress_queue.put((done, total, op))
+
+        def work():
+            copier.execute_plan(plan, progress_callback=progress_cb)
+            if copy_serato:
+                self._progress_queue.put(("serato_start",))
+                dest_serato_dir = copier.copy_serato_folder(selected_libs[0], dest_root)
+                self._progress_queue.put(("serato_done",))
+                if rewrite_paths:
+                    self._progress_queue.put(("rewrite_start",))
+                    copier.rewrite_serato_database(selected_libs[0], plan, dest_serato_dir, dest_root)
+                    self._progress_queue.put(("rewrite_done",))
+            self._progress_queue.put(None)  # semnal de final
+
+        threading.Thread(target=work, daemon=True).start()
+        self.root.after(100, self._poll_progress)
+
+    def _poll_progress(self):
+        try:
+            while True:
+                item = self._progress_queue.get_nowait()
+                if item is None:
+                    self.set_status("Copiere terminata.")
+                    self.log("Copiere terminata.")
+                    messagebox.showinfo(APP_TITLE, "Copierea s-a terminat.")
+                    self.copy_btn["state"] = "normal"
+                    return
+                if item[0] == "serato_start":
+                    self.set_status("Copiez folderul _Serato_ (baza de date + crate-urile)...")
+                    self.log("Copiez folderul _Serato_ la radacina destinatiei...")
+                    continue
+                if item[0] == "serato_done":
+                    self.log("Folder _Serato_ copiat cu succes.")
+                    continue
+                if item[0] == "rewrite_start":
+                    self.set_status("Rescriu caile in copia bazei de date...")
+                    self.log("Rescriu caile in copia bazei de date si in crate-uri...")
+                    continue
+                if item[0] == "rewrite_done":
+                    self.log("Caile din copia bazei de date au fost actualizate. "
+                              "Serato ar trebui sa vada track-urile direct, fara relocate.")
+                    continue
+                done, total, op = item
+                self.progress["value"] = done
+                self.set_status(f"Copiere: {done}/{total}...")
+                kind = "copiat" if op.is_primary else "hardlink"
+                self.log(f"[{done}/{total}] ({kind}) {op.dest_path}")
+        except queue.Empty:
+            pass
+        self.root.after(150, self._poll_progress)
+
+
+def _ro_count(n: int, singular: str, plural: str) -> str:
+    return f"{n} {singular if n == 1 else plural}"
+
+
+def _human_size(n: int) -> str:
+    size = float(n)
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if size < 1024:
+            return f"{size:.1f}{unit}"
+        size /= 1024
+    return f"{size:.1f}PB"
+
+
+def main():
+    root = Tk()
+    root.withdraw()
+
+    icon = _build_app_icon()
+    root.iconphoto(True, icon)
+    root._app_icon_ref = icon   # pastreaza referinta, altfel Tk arunca imaginea
+
+    def reveal():
+        SeratoMigratorApp(root)
+        root.deiconify()
+
+    _show_splash(root, reveal)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
