@@ -879,6 +879,9 @@ class SeratoMigratorApp:
             "Fisiere orfane: gaseste fisiere audio de pe disk necunoscute de Serato",
             "Migrare / Reorganizare: copiaza track-urile in foldere numite dupa crate-uri,"
             " pe o destinatie noua, fara sa stearga originalele",
+            "Metadata: gaseste track-uri cu artistul lipsa/ingropat in titlu si"
+            " permite editare individuala sau de grup a Artist/Titlu/Album/Gen,"
+            " atat in baza de date Serato cat si in tag-urile ID3 ale fisierelor",
             "Jurnal: istoricul tuturor operatiilor facute de aplicatie",
         ]
         for line in info_lines:
