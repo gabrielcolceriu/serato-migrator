@@ -27,6 +27,7 @@ from PyObjCTools import AppHelper
 
 import scanner
 import copier
+import metadata_editor
 
 from . import theme
 
@@ -2356,42 +2357,326 @@ class MigrateScreen(BaseScreen):
 
 
 # ------------------------------------------------------------------- Metadata
+_MD_FIELDS = [("artist", "tart", "Artist"), ("title", "tsng", "Titlu"),
+              ("album", "talb", "Album"), ("genre", "tgen", "Gen")]
+_MULTI = "— Valori multiple —"
+
+
 class MetadataScreen(BaseScreen):
     def build_(self, v):
-        self._headerInto_title_subtitle_(v, "Metadata", "Găsește și corectează Artist / Titlu / Album / Gen")
-        self._search = NSSearchField.alloc().initWithFrame_(
-            NSMakeRect(24, v.bounds().size.height - 110, 280, 24))
+        self._rows = []          # list[Track] index-aligned with the table
+        self._inspector = None
+        self._headerInto_title_subtitle_(
+            v, "Metadata", "Găsește și corectează Artist / Titlu / Album / Gen")
+        y = v.bounds().size.height
+
+        from AppKit import NSSegmentedControl
+        seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(24, y - 96, 420, 24))
+        seg.setSegmentCount_(4)
+        for i, t in enumerate(("Toate", "Incomplete", "Fără artist", "Fără titlu")):
+            seg.setLabel_forSegment_(t, i)
+            seg.setWidth_forSegment_(104, i)
+        seg.setSelectedSegment_(0)
+        seg.setTarget_(self); seg.setAction_(b"filterChanged:")
+        seg.setAutoresizingMask_(1 << 3)
+        self._seg = seg
+        v.addSubview_(seg)
+
+        self._search = NSSearchField.alloc().initWithFrame_(NSMakeRect(456, y - 96, 240, 24))
         self._search.setAutoresizingMask_(1 << 3)
-        self._search.setTarget_(self)
-        self._search.setAction_(b"doSearch:")
+        self._search.setPlaceholderString_("Caută")
+        self._search.setTarget_(self); self._search.setAction_(b"filterChanged:")
         v.addSubview_(self._search)
-        body = self._bodyContainerIn_(v, top=126)
+
+        an = _button("Analizează Artist/Titlu lipsă", self, b"analyze:")
+        an.setFrame_(NSMakeRect(708, y - 98, 240, 28))
+        an.setAutoresizingMask_(1 << 3 | 1 << 0)
+        v.addSubview_(an)
+
+        body = self._bodyContainerIn_(v, top=112)
+        # left: results table
         self._tv, self._ds, scroll = _table(
             ["artist", "title", "album", "genre", "file"],
-            ["Artist", "Titlu", "Album", "Gen", "Fișier"], [150, 200, 150, 100, 220])
-        scroll.setFrame_(body.bounds())
+            ["Artist", "Titlu", "Album", "Gen", "Fișier"], [150, 190, 140, 100, 220])
+        scroll.setFrame_(NSMakeRect(0, 0, body.bounds().size.width - 320,
+                                    body.bounds().size.height))
+        scroll.setAutoresizingMask_(_AUTOSIZE)
         body.addSubview_(scroll)
+        from Foundation import NSNotificationCenter
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"selChanged:", "NSTableViewSelectionDidChangeNotification", self._tv)
+
+        # right: bulk editor
+        self._bulk = _FlippedView.alloc().initWithFrame_(
+            NSMakeRect(body.bounds().size.width - 300, 0, 300, body.bounds().size.height))
+        self._bulk.setAutoresizingMask_(1 << 0 | 1 << 4)
+        body.addSubview_(self._bulk)
+        self._buildBulk()
+        self._selCount = 0
 
     def didBecomeVisible(self):
-        pass
+        self._reload()
 
-    def doSearch_(self, sender):
+    def librariesChanged(self):
+        self._reload()
+
+    # ---- Track Inspector for a single selection (UI-15) ----
+    @objc.python_method
+    def _ensureInspector(self):
+        if self._inspector is None:
+            from .track_inspector import TrackInspector
+            self._inspector = TrackInspector.alloc().initWithApp_(self._app)
+        return self._inspector
+
+    def inspectorView(self):
+        if len(self._tv.selectedRowIndexes()) != 1:
+            return None
+        return self._ensureInspector().view()
+
+    # ---- filtering ----
+    def filterChanged_(self, sender):
+        self._reload()
+
+    @objc.python_method
+    def _reload(self):
         lib = self._app.activeLibrary()
-        q = self._search.stringValue().lower()
-        if lib is None or not q:
+        if lib is None:
+            self._rows = []
             self._ds.setData_([])
             self._tv.reloadData()
+            self._renderBulk()
             return
-        rows = []
+        mode = self._seg.selectedSegment()
+        q = self._search.stringValue().strip().lower()
+        out = []
         for rp, t in lib.tracks.items():
-            blob = " ".join(x or "" for x in (t.artist, t.title, t.album, t.genre, rp)).lower()
-            if q in blob:
-                rows.append(((t.artist or ""), (t.title or ""), (t.album or ""),
-                             (t.genre or ""), Path(t.abs_path).name))
-            if len(rows) >= 500:
+            a = (t.artist or "").strip()
+            ti = (t.title or "").strip()
+            g = (t.genre or "").strip()
+            if mode == 1 and (a and ti and g):
+                continue
+            if mode == 2 and a:
+                continue
+            if mode == 3 and ti:
+                continue
+            if q:
+                blob = " ".join(x or "" for x in (t.artist, t.title, t.album, t.genre, rp)).lower()
+                if q not in blob:
+                    continue
+            out.append(t)
+            if len(out) >= 2000:
                 break
-        self._ds.setData_(rows)
+        self._rows = out
+        self._ds.setData_([((t.artist or ""), (t.title or ""), (t.album or ""),
+                            (t.genre or ""), Path(t.abs_path).name) for t in out])
         self._tv.reloadData()
+        self._renderBulk()
+
+    # ---- bulk editor ----
+    @objc.python_method
+    def _buildBulk(self):
+        self._bChk = {}
+        self._bFld = {}
+        h = self._bulk.bounds().size.height
+        self._bTitle = theme.make_label("", style="headline")
+        self._bTitle.setFrame_(NSMakeRect(0, 6, 300, 20))
+        self._bulk.addSubview_(self._bTitle)
+        yy = 40
+        for key, _tag, label in _MD_FIELDS:
+            chk = NSButton.alloc().initWithFrame_(NSMakeRect(0, yy, 300, 20))
+            chk.setButtonType_(NSSwitchButton)
+            chk.setTitle_(f"Actualizează {label}")
+            chk.setTarget_(self); chk.setAction_(b"bulkChkToggled:")
+            self._bulk.addSubview_(chk)
+            fld = NSTextField.alloc().initWithFrame_(NSMakeRect(0, yy + 22, 300, 22))
+            fld.setFont_(theme.font("body"))
+            fld.setEnabled_(False)
+            self._bulk.addSubview_(fld)
+            self._bChk[key] = chk
+            self._bFld[key] = fld
+            yy += 54
+        self._bId3 = NSButton.alloc().initWithFrame_(NSMakeRect(0, yy, 300, 20))
+        self._bId3.setButtonType_(NSSwitchButton)
+        self._bId3.setTitle_("Scrie modificările și în tag-urile ID3")
+        self._bId3.setState_(1)
+        self._bulk.addSubview_(self._bId3)
+        yy += 30
+        self._bApply = NSButton.alloc().initWithFrame_(NSMakeRect(0, yy, 300, 30))
+        self._bApply.setBezelStyle_(NSBezelStyleRounded)
+        self._bApply.setTitle_("Aplică")
+        self._bApply.setTarget_(self); self._bApply.setAction_(b"applyBulk:")
+        self._bulk.addSubview_(self._bApply)
+
+    def bulkChkToggled_(self, sender):
+        for key, chk in self._bChk.items():
+            self._bFld[key].setEnabled_(chk.state() == 1)
+
+    @objc.python_method
+    def _selectedTracks(self):
+        idx = self._tv.selectedRowIndexes()
+        out = []
+        i = idx.firstIndex()
+        while i != _NSNotFound:
+            if 0 <= i < len(self._rows):
+                out.append(self._rows[i])
+            i = idx.indexGreaterThanIndex_(i)
+        return out
+
+    def selChanged_(self, note):
+        self._renderBulk()
+        if self._app._router is not None:
+            sel = self._selectedTracks()
+            if len(sel) == 1:
+                self._ensureInspector().set_track(
+                    self._app.activeLibrary(), sel[0], on_saved=self._reload)
+            self._app._router.refreshInspector()
+
+    @objc.python_method
+    def _renderBulk(self):
+        sel = self._selectedTracks()
+        self._selCount = len(sel)
+        if len(sel) < 2:
+            self._bTitle.setStringValue_(
+                "Selectează 2+ track-uri pentru editare în bloc"
+                if len(sel) == 0 else "1 track — editează în inspector")
+            for key, _t, _l in _MD_FIELDS:
+                self._bChk[key].setEnabled_(False)
+                self._bFld[key].setEnabled_(False)
+                self._bFld[key].setStringValue_("")
+            self._bApply.setEnabled_(False)
+            return
+        self._bTitle.setStringValue_(f"{len(sel)} track-uri selectate")
+        for key, _tag, _label in _MD_FIELDS:
+            vals = {(getattr(t, key) or "").strip() for t in sel}
+            self._bChk[key].setEnabled_(True)
+            fld = self._bFld[key]
+            if len(vals) == 1:
+                common = next(iter(vals))
+                fld.setStringValue_(common)
+                fld.setPlaceholderString_("(gol)" if not common else "")
+            else:
+                fld.setStringValue_("")
+                fld.setPlaceholderString_(_MULTI)
+            fld.setEnabled_(self._bChk[key].state() == 1)
+        self._bApply.setEnabled_(True)
+        self._bApply.setTitle_(f"Aplică la {len(sel)} track-uri")
+
+    def applyBulk_(self, sender):
+        lib = self._app.activeLibrary()
+        sel = self._selectedTracks()
+        if lib is None or len(sel) < 2:
+            return
+        changes = {}
+        for key, tag, label in _MD_FIELDS:
+            if self._bChk[key].state() == 1:
+                changes[tag] = (label, self._bFld[key].stringValue())
+        if not changes:
+            _alert("Bifează cel puțin un câmp de actualizat.")
+            return
+        summary = "\n".join(
+            f"• {label} → „{val}”" if val else f"• {label} → (gol)"
+            for label, val in changes.values())
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"Aplici modificările la {len(sel)} track-uri?")
+        a.setInformativeText_(summary + "\n\n"
+                              + ("Se scriu și tag-urile ID3." if self._bId3.state() == 1
+                                 else "Doar în baza de date Serato."))
+        a.addButtonWithTitle_("Aplică")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+        edits = {t.raw_path: {tag: val for tag, (_l, val) in changes.items()} for t in sel}
+        write_id3 = self._bId3.state() == 1
+        self._app._beginBusy_("metadata")
+        self._app.log_(f"Metadata în bloc: {len(edits)} track-uri, câmpuri "
+                       + ", ".join(l for l, _v in changes.values()), "info", "metadata")
+
+        def work():
+            err = None
+            try:
+                metadata_editor.apply_edits(lib, edits, write_id3=write_id3)
+            except Exception:
+                err = traceback.format_exc()
+            AppHelper.callAfter(self._bulkDone_, changes, sel, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _bulkDone_(self, changes, sel, err):
+        self._app._endBusy_("metadata")
+        if err:
+            self._app.log_("Eroare metadata în bloc:\n" + err, "error", "metadata")
+            _alert("Aplicarea a eșuat (vezi Jurnal).")
+            return
+        for t in sel:
+            for _tag, (label, val) in changes.items():
+                key = next(k for k, tg, _l in _MD_FIELDS if _l == label)
+                setattr(t, key, val or None)
+        self._app.log_(f"Metadata actualizată pentru {len(sel)} track-uri", "info", "metadata")
+        self._reload()
+
+    # ---- Analizează Artist/Titlu lipsă (sheet) ----
+    def analyze_(self, sender):
+        lib = self._app.activeLibrary()
+        if lib is None:
+            return
+        self._app._beginBusy_("metadata")
+
+        def work():
+            try:
+                sugg = metadata_editor.suggest_artist_title_fixes(lib)
+                err = None
+            except Exception:
+                sugg, err = [], traceback.format_exc()
+            AppHelper.callAfter(self._analyzeDone_, sugg, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _analyzeDone_(self, sugg, err):
+        self._app._endBusy_("metadata")
+        if err:
+            self._app.log_("Eroare analiză Artist/Titlu:\n" + err, "error", "metadata")
+            _alert("Analiza a eșuat (vezi Jurnal).")
+            return
+        if not sugg:
+            _alert("Nu am găsit track-uri de corectat automat.")
+            return
+        preview = "\n".join(
+            f"• {s.filename}\n    {s.new_artist}  —  {s.new_title}"
+            for s in sugg[:25])
+        more = f"\n\n(+{len(sugg) - 25} altele)" if len(sugg) > 25 else ""
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"{len(sugg)} track-uri pot fi corectate")
+        a.setInformativeText_(preview + more)
+        a.addButtonWithTitle_(f"Aplică toate ({len(sugg)})")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+        lib = self._app.activeLibrary()
+        edits = {s.raw_path: {"tart": s.new_artist, "tsng": s.new_title} for s in sugg}
+        self._app._beginBusy_("metadata")
+
+        def work():
+            err = None
+            try:
+                metadata_editor.apply_edits(lib, edits, write_id3=True)
+            except Exception:
+                err = traceback.format_exc()
+            AppHelper.callAfter(self._applyAnalyzeDone_, len(edits), err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _applyAnalyzeDone_(self, n, err):
+        self._app._endBusy_("metadata")
+        if err:
+            self._app.log_("Eroare aplicare analiză:\n" + err, "error", "metadata")
+            _alert("Aplicarea a eșuat (vezi Jurnal).")
+            return
+        self._app.log_(f"Artist/Titlu corectate pentru {n} track-uri", "info", "metadata")
+        _alert(f"{n} track-uri corectate.")
+        self._app.rescanLibraries_(None)
 
 
 # ------------------------------------------------------------------- Journal
