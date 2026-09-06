@@ -82,13 +82,30 @@ class ContentRouter(NSObject):
             vc = self._make(dest_id)
             self._vcs[dest_id] = vc
         view = vc.view()
-        view.setFrame_(self._container.bounds())
+        b = self._container.bounds()
+        top = self._topInset()
+        view.setFrame_(NSMakeRect(0, 0, b.size.width, b.size.height - top))
         view.setAutoresizingMask_((1 << 1) | (1 << 4))  # width | height
         self._container.addSubview_(view)
         self._current = dest_id
         self._updateInspectorFor_(vc)
         if hasattr(vc, "didBecomeVisible"):
             vc.didBecomeVisible()
+
+    @objc.python_method
+    def _topInset(self):
+        """Points of the full-size content view that sit behind the unified
+        title bar + toolbar. Screens lay out against a working area that
+        already excludes this, so nothing hides under the toolbar."""
+        try:
+            win = self._container.window()
+            if win is not None:
+                d = win.contentView().bounds().size.height - win.contentLayoutRect().size.height
+                if d > 0:
+                    return float(d)
+        except Exception:
+            pass
+        return 66.0
 
     @objc.python_method
     def _updateInspectorFor_(self, vc):
@@ -98,7 +115,9 @@ class ContentRouter(NSObject):
             v.removeFromSuperview()
         insp = vc.inspectorView() if hasattr(vc, "inspectorView") else None
         if insp is not None:
-            insp.setFrame_(self._inspector_container.bounds())
+            ib = self._inspector_container.bounds()
+            itop = self._topInset()
+            insp.setFrame_(NSMakeRect(0, 0, ib.size.width, ib.size.height - itop))
             insp.setAutoresizingMask_((1 << 1) | (1 << 4))
             self._inspector_container.addSubview_(insp)
         if self._wc is not None:
