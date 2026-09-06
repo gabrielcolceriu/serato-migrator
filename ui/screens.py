@@ -603,6 +603,7 @@ class LibrariesScreen(BaseScreen):
             return
         self._app.log_(f"Caut fișierele lipsă din {lib.name} pe volum…", "info", "libraries")
         self._app._beginBusy_("verify")
+        self._app.setOperationStatus_("Se caută fișierele lipsă…")
 
         def work():
             try:
@@ -644,6 +645,7 @@ class LibrariesScreen(BaseScreen):
             return
         self._app.log_(f"Reconstruiesc baza de date pentru {lib.name}…", "info", "libraries")
         self._app._beginBusy_("rebuild")
+        self._app.setOperationStatus_("Se reconstruiește baza de date…")
 
         def work():
             try:
@@ -687,6 +689,7 @@ class LibrariesScreen(BaseScreen):
         dest = panel.URL().path()
         self._app.log_(f"Exportă baza de date {lib.name} → {dest}", "info", "libraries")
         self._app._beginBusy_("export")
+        self._app.setOperationStatus_("Se exportă baza de date…")
 
         def work():
             try:
@@ -1426,6 +1429,8 @@ class OrphansScreen(BaseScreen):
         def progress(n):
             AppHelper.callAfter(self._scanSub.setStringValue_,
                                 f"{theme.format_int(n)} fișiere inspectate — {root}")
+            AppHelper.callAfter(self._app.setOperationStatus_,
+                                f"Se scanează orfane… {theme.format_int(n)} fișiere")
 
         def work():
             err = None
@@ -2196,6 +2201,7 @@ class MigrateScreen(BaseScreen):
     @objc.python_method
     def _phaseTo_(self, name):
         self._phase.setStringValue_(name)
+        self._app.setOperationStatus_(name + "…")
         self._runLog(name)
 
     @objc.python_method
@@ -2207,6 +2213,8 @@ class MigrateScreen(BaseScreen):
         self._bar.setDoubleValue_(float(done))
         self._progLine.setStringValue_(
             f"Copiere {theme.format_int(done)} / {theme.format_int(total)} fișiere · {frac*100:.0f}%")
+        self._app.setOperationStatus_(
+            f"Copiere {theme.format_int(done)} / {theme.format_int(total)} · {frac*100:.0f}%")
         self._curFile.setStringValue_(name)
         el = _t.time() - self._t0
         eta = ""

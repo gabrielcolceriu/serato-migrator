@@ -347,6 +347,7 @@ class AppDelegate(NSObject):
         self._libraries = []
         self._journal = []          # list[(NSDate, level, op, msg)]
         self._busy = 0
+        self._op_status = ""
         return self
 
     # --- lifecycle ---
@@ -389,6 +390,7 @@ class AppDelegate(NSObject):
     def rescanLibraries_(self, sender):
         self.log_("Scanez bibliotecile Serato…", "info", "scan")
         self._beginBusy_("scanare biblioteci")
+        self.setOperationStatus_("Se scanează bibliotecile Serato…")
 
         def work():
             try:
@@ -474,9 +476,28 @@ class AppDelegate(NSObject):
 
     def _endBusy_(self, label):
         self._busy = max(0, self._busy - 1)
+        if self._busy == 0:
+            self.clearOperationStatus()
 
     def isBusy(self):
         return self._busy > 0
+
+    # --- transient global operation status (UI-19) ---
+    def setOperationStatus_(self, text):
+        """Shown in the sidebar footer only while a long op runs; pass '' / None
+        to clear. Display-only — no Cancel until a cooperative flag exists in
+        the logic modules."""
+        self._op_status = str(text) if text else ""
+        if self._wc is not None:
+            self._wc.refreshSidebarFooter()
+
+    def clearOperationStatus(self):
+        self._op_status = ""
+        if self._wc is not None:
+            self._wc.refreshSidebarFooter()
+
+    def operationStatus(self):
+        return getattr(self, "_op_status", "")
 
     def windowShouldClose(self):
         if self._busy > 0:

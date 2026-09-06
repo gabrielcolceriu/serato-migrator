@@ -84,11 +84,22 @@ class SidebarController(NSObject):
         self._health_target = h.target
         self._f_name.setStringValue_(lib.name)
         self._f_count.setStringValue_(f"{theme.format_int(len(lib.present_tracks))} track-uri")
-        mark = {"ok": "✓", "scanning": "↻"}.get(h.key, "⚠")
-        self._f_health.setStringValue_(f"{mark} {h.label}")
-        self._f_health.setTextColor_(
-            NSColor.secondaryLabelColor() if h.key in ("ok", "scanning")
-            else NSColor.systemOrangeColor())
+        # UI-19: while a long op runs, the footer's status line becomes the
+        # transient global operation status; otherwise it shows library health.
+        op = ""
+        try:
+            op = self._app.operationStatus()
+        except Exception:
+            op = ""
+        if op:
+            self._f_health.setStringValue_(f"↻ {op}")
+            self._f_health.setTextColor_(NSColor.secondaryLabelColor())
+        else:
+            mark = {"ok": "✓", "scanning": "↻"}.get(h.key, "⚠")
+            self._f_health.setStringValue_(f"{mark} {h.label}")
+            self._f_health.setTextColor_(
+                NSColor.secondaryLabelColor() if h.key in ("ok", "scanning")
+                else NSColor.systemOrangeColor())
 
     # ---- build ----
     @objc.python_method
