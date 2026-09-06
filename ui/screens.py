@@ -20,6 +20,7 @@ from AppKit import (
     NSProgressIndicator, NSProgressIndicatorBarStyle, NSSearchField,
     NSImageView, NSPopUpButton, NSAlert, NSAttributedString,
     NSForegroundColorAttributeName, NSFontAttributeName, NSLayoutConstraint,
+    NSSwitchButton,
 )
 from Foundation import NSObject, NSMakeRect, NSDate, NSIndexSet, NSNotFound as _NSNotFound
 from PyObjCTools import AppHelper
@@ -1171,6 +1172,14 @@ class CratesScreen(BaseScreen):
         self._app.rescanLibraries_(None)
 
 
+class _FlippedView(NSView):
+    """Top-left origin, so manually-placed rows read top-to-bottom and a scroll
+    view of one starts at the top."""
+
+    def isFlipped(self):
+        return True
+
+
 class _DropView(NSView):
     """Plain NSView that accepts folder drops and forwards them to a screen."""
 
@@ -1580,46 +1589,280 @@ class OrphansScreen(BaseScreen):
 
 
 # ------------------------------------------------------------------- Migrate
+_MIG_STEPS = ["Sursă", "Destinație", "Opțiuni", "Verificare",
+              "Migrare", "Verificare-post", "Complet"]
+
+
 class MigrateScreen(BaseScreen):
+    """The hero workflow — a guided 7-step pager. Every copier call is the same
+    one the old flow made; the pager only sequences and narrates them."""
+
     def build_(self, v):
-        self._headerInto_title_subtitle_(v, "Migrare", "Copiază track-urile în foldere numite după crate-uri, pe o destinație nouă")
-        self._src = _label("", secondary=True)
-        self._src.setFrame_(NSMakeRect(24, v.bounds().size.height - 108, 800, 18))
-        self._src.setAutoresizingMask_(1 << 3)
-        v.addSubview_(self._src)
+        self._step = 0
+        self._sel_keys = None       # None = all crates; else set[str(crate.file_path)]
+        self._include_unsorted = True
         self._dest = ""
-        self._destLabel = _label("Destinație: (nicio)", secondary=True)
-        self._destLabel.setFrame_(NSMakeRect(24, v.bounds().size.height - 132, 800, 18))
-        self._destLabel.setAutoresizingMask_(1 << 3)
-        v.addSubview_(self._destLabel)
-        b1 = _button("Alege destinația…", self, b"chooseDest:")
-        b1.setFrame_(NSMakeRect(24, v.bounds().size.height - 172, 180, 28))
-        b1.setAutoresizingMask_(1 << 3)
-        v.addSubview_(b1)
-        b2 = _button("Previzualizare", self, b"preview:")
-        b2.setFrame_(NSMakeRect(214, v.bounds().size.height - 172, 150, 28))
-        b2.setAutoresizingMask_(1 << 3)
-        v.addSubview_(b2)
-        self._summary = _label("", size=13)
-        self._summary.setFrame_(NSMakeRect(24, v.bounds().size.height - 220, 820, 40))
-        self._summary.setAutoresizingMask_(1 << 3)
-        v.addSubview_(self._summary)
+        self._db_mode = "fresh"     # "fresh" | "copy"
+        self._normalize = True
+        self._backup = True
         self._plan = None
-        self.render()
+        self._required = 0
+        self._free = None
+        self._crate_sizes = {}      # crate_key -> bytes
+        self._run_log = []
+        self._verify = None
+        self._t0 = 0.0
+
+        self._headerInto_title_subtitle_(v, "Migrare", None)
+        self._crumbs = theme.make_label("", style="caption", color=theme.secondary_label())
+        self._crumbs.setFrame_(NSMakeRect(24, v.bounds().size.height - 92, 700, 16))
+        self._crumbs.setAutoresizingMask_(1 << 3)
+        v.addSubview_(self._crumbs)
+
+        self._pager = NSView.alloc().initWithFrame_(
+            NSMakeRect(24, 52, v.bounds().size.width - 48, v.bounds().size.height - 92 - 52))
+        self._pager.setAutoresizingMask_(_AUTOSIZE)
+        v.addSubview_(self._pager)
+
+        # nav bar
+        self._backBtn = _button("‹ Înapoi", self, b"back:")
+        self._backBtn.setFrame_(NSMakeRect(24, 12, 100, 28))
+        self._backBtn.setAutoresizingMask_(1 << 5)
+        v.addSubview_(self._backBtn)
+        self._nextBtn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 12, 160, 30))
+        self._nextBtn.setBezelStyle_(NSBezelStyleRounded)
+        self._nextBtn.setTitle_("Continuă ›")
+        self._nextBtn.setKeyEquivalent_("\r")
+        self._nextBtn.setTarget_(self)
+        self._nextBtn.setAction_(b"next:")
+        self._nextBtn.setFrameOrigin_((v.bounds().size.width - 48 - 160 + 24, 12))
+        self._nextBtn.setAutoresizingMask_(1 << 0)
+        v.addSubview_(self._nextBtn)
+
+        self._panels = {}
+        self._buildSource()
+        self._buildDest()
+        self._buildOptions()
+        self._buildReview()
+        self._buildRun()
+        self._buildPostVerify()
+        self._buildComplete()
+        self._go(0)
 
     def didBecomeVisible(self):
-        self.render()
+        if self._step == 0:
+            self._renderSource()
 
     def librariesChanged(self):
-        self.render()
+        if self._step == 0:
+            self._renderSource()
 
-    def render(self):
+    # ---- pager plumbing ----
+    @objc.python_method
+    def _go(self, step):
+        self._step = max(0, min(step, len(_MIG_STEPS) - 1))
+        for i, p in self._panels.items():
+            p.setHidden_(i != self._step)
+        self._crumbs.setStringValue_(
+            "  →  ".join(("[%s]" % s if i == self._step else s)
+                         for i, s in enumerate(_MIG_STEPS)))
+        self._backBtn.setEnabled_(0 < self._step < 4)
+        running = self._step in (4,)
+        self._backBtn.setHidden_(self._step in (4, 5, 6))
+        labels = {3: "Începe migrarea", 5: "Continuă ›", 6: "Închide"}
+        self._nextBtn.setTitle_(labels.get(self._step, "Continuă ›"))
+        self._nextBtn.setHidden_(self._step == 4)
+        self._nextBtn.setEnabled_(not running)
+        hooks = {0: self._renderSource, 1: self._renderDest, 3: self._renderReview,
+                 5: self._renderPostVerify, 6: self._renderComplete}
+        h = hooks.get(self._step)
+        if h:
+            h()
+
+    def back_(self, sender):
+        self._go(self._step - 1)
+
+    def next_(self, sender):
+        s = self._step
+        if s == 0:
+            if not self._selectedCrateList():
+                _alert("Alege cel puțin un crate.")
+                return
+            self._go(1)
+        elif s == 1:
+            if not self._dest:
+                _alert("Alege o destinație.")
+                return
+            self._go(2)
+        elif s == 2:
+            self._go(3)
+        elif s == 3:
+            self._startMigration()
+        elif s == 5:
+            self._go(6)
+        elif s == 6:
+            self._go(0)
+
+    @objc.python_method
+    def _panel(self, key, top=0):
+        p = NSView.alloc().initWithFrame_(self._pager.bounds())
+        p.setAutoresizingMask_(_AUTOSIZE)
+        p.setHidden_(True)
+        self._pager.addSubview_(p)
+        self._panels[key] = p
+        return p
+
+    # ================================================== step 0 — Sursă
+    @objc.python_method
+    def _buildSource(self):
+        p = self._panel(0)
+        y = p.bounds().size.height
+        self._srcLine = theme.make_label("", style="headline")
+        self._srcLine.setFrame_(NSMakeRect(0, y - 26, p.bounds().size.width, 20))
+        self._srcLine.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._srcLine)
+        bar = NSView.alloc().initWithFrame_(NSMakeRect(0, y - 60, p.bounds().size.width, 26))
+        bar.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(bar)
+        ba = _button("Toate", self, b"crAll:"); ba.setFrame_(NSMakeRect(0, 0, 80, 24)); bar.addSubview_(ba)
+        bn = _button("Niciunul", self, b"crNone:"); bn.setFrame_(NSMakeRect(86, 0, 90, 24)); bar.addSubview_(bn)
+        self._unsortedChk = NSButton.alloc().initWithFrame_(NSMakeRect(190, 2, 320, 20))
+        self._unsortedChk.setButtonType_(NSSwitchButton)
+        self._unsortedChk.setTitle_("Include track-urile ne-încadrate în crate-uri")
+        self._unsortedChk.setState_(1)
+        self._unsortedChk.setTarget_(self)
+        self._unsortedChk.setAction_(b"toggleUnsorted:")
+        bar.addSubview_(self._unsortedChk)
+        sc = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 28, p.bounds().size.width, y - 60 - 28))
+        sc.setHasVerticalScroller_(True)
+        sc.setBorderType_(0)
+        sc.setDrawsBackground_(False)
+        sc.setAutoresizingMask_(_AUTOSIZE)
+        self._crateDoc = _FlippedView.alloc().initWithFrame_(NSMakeRect(0, 0, p.bounds().size.width, 10))
+        self._crateDoc.setAutoresizingMask_(1 << 1)  # width sizable
+        sc.setDocumentView_(self._crateDoc)
+        self._crateScroll = sc
+        p.addSubview_(sc)
+        self._crateFooter = theme.make_label("", style="caption", color=theme.secondary_label())
+        self._crateFooter.setFrame_(NSMakeRect(0, 6, p.bounds().size.width, 16))
+        self._crateFooter.setAutoresizingMask_(1 << 1)
+        p.addSubview_(self._crateFooter)
+        self._crateChecks = []   # (NSButton, crate)
+
+    @objc.python_method
+    def _renderSource(self):
         lib = self._app.activeLibrary()
-        if lib:
-            self._src.setStringValue_(
-                f"Sursă: {lib.name} — {lib.volume_root} · {theme.format_int(len(lib.present_tracks))} track-uri · {theme.format_int(len(lib.crates))} crate-uri")
-        else:
-            self._src.setStringValue_("Sursă: (nicio bibliotecă)")
+        if lib is None:
+            self._srcLine.setStringValue_("Nicio bibliotecă activă.")
+            self._nextBtn.setEnabled_(False)
+            return
+        self._nextBtn.setEnabled_(True)
+        self._srcLine.setStringValue_(
+            f"{lib.name} · {lib.volume_root} · {theme.format_int(len(lib.present_tracks))} "
+            f"track-uri · {theme.format_int(len(lib.crates))} crate-uri")
+        for sub in list(self._crateDoc.subviews()):
+            sub.removeFromSuperview()
+        self._crateChecks = []
+        row_h = 22
+        n = len(lib.crates)
+        vis_h = self._crateScroll.contentSize().height
+        doc_h = max(n * row_h, int(vis_h))
+        w = self._crateScroll.contentSize().width
+        self._crateDoc.setFrame_(NSMakeRect(0, 0, w, doc_h))
+        for i, crate in enumerate(lib.crates):
+            key = str(crate.file_path)
+            cb = NSButton.alloc().initWithFrame_(NSMakeRect(0, i * row_h, w, 20))
+            cb.setButtonType_(NSSwitchButton)
+            cb.setTitle_(crate.display_name)
+            cb.setState_(1 if (self._sel_keys is None or key in self._sel_keys) else 0)
+            cb.setTarget_(self)
+            cb.setAction_(b"crateToggled:")
+            cb.setAutoresizingMask_(1 << 1)  # width sizable
+            self._crateDoc.addSubview_(cb)
+            self._crateChecks.append((cb, crate))
+        if not getattr(self, "_sizes_started", False):
+            self._sizes_started = True
+            threading.Thread(target=self._computeCrateSizes, daemon=True).start()
+        self._updateCrateFooter()
+
+    @objc.python_method
+    def _selectedCrateList(self):
+        return [(cb, cr) for cb, cr in self._crateChecks if cb.state() == 1]
+
+    @objc.python_method
+    def _syncSelKeys(self):
+        picked = {str(cr.file_path) for cb, cr in self._crateChecks if cb.state() == 1}
+        allk = {str(cr.file_path) for cb, cr in self._crateChecks}
+        self._sel_keys = None if picked == allk else picked
+
+    @objc.python_method
+    def _updateCrateFooter(self):
+        picked = self._selectedCrateList()
+        n = len(picked)
+        tot = len(self._crateChecks)
+        size = sum(self._crate_sizes.get(str(cr.file_path), 0) for cb, cr in picked)
+        extra = "  (mărimile se calculează…)" if not self._crate_sizes else ""
+        self._crateFooter.setStringValue_(
+            f"{n}/{tot} crate-uri · ~{theme.human_size(size)}{extra}")
+
+    def crateToggled_(self, sender):
+        self._syncSelKeys()
+        self._updateCrateFooter()
+
+    def crAll_(self, sender):
+        for cb, _cr in self._crateChecks:
+            cb.setState_(1)
+        self._syncSelKeys(); self._updateCrateFooter()
+
+    def crNone_(self, sender):
+        for cb, _cr in self._crateChecks:
+            cb.setState_(0)
+        self._syncSelKeys(); self._updateCrateFooter()
+
+    def toggleUnsorted_(self, sender):
+        self._include_unsorted = self._unsortedChk.state() == 1
+
+    @objc.python_method
+    def _computeCrateSizes(self):
+        lib = self._app.activeLibrary()
+        if lib is None:
+            return
+        vol = Path(lib.volume_root)
+        sizes = {}
+        for crate in lib.crates:
+            tot = 0
+            for rp in crate.raw_paths:
+                try:
+                    tot += (vol / rp).stat().st_size
+                except OSError:
+                    pass
+            sizes[str(crate.file_path)] = tot
+        self._crate_sizes = sizes
+        AppHelper.callAfter(self._updateCrateFooter)
+
+    # ================================================== step 1 — Destinație
+    @objc.python_method
+    def _buildDest(self):
+        p = self._panel(1)
+        y = p.bounds().size.height
+        b = _button("Alege destinația…", self, b"chooseDest:")
+        b.setFrame_(NSMakeRect(0, y - 40, 180, 30))
+        b.setAutoresizingMask_(1 << 3)
+        p.addSubview_(b)
+        self._destPath = theme.make_label("Nicio destinație aleasă.", style="body")
+        self._destPath.setFrame_(NSMakeRect(0, y - 76, p.bounds().size.width, 18))
+        self._destPath.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._destPath)
+        self._destInfo = theme.make_label("", style="secondary")
+        self._destInfo.setFrame_(NSMakeRect(0, y - 150, p.bounds().size.width, 66))
+        self._destInfo.setAutoresizingMask_(1 << 3 | 1 << 1)
+        self._destInfo.setLineBreakMode_(0)
+        self._destInfo.setUsesSingleLineMode_(False)
+        p.addSubview_(self._destInfo)
+        self._destFit = theme.make_label("", style="headline")
+        self._destFit.setFrame_(NSMakeRect(0, y - 178, p.bounds().size.width, 20))
+        self._destFit.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._destFit)
 
     def chooseDest_(self, sender):
         panel = NSOpenPanel.openPanel()
@@ -1628,39 +1871,488 @@ class MigrateScreen(BaseScreen):
         panel.setPrompt_("Alege")
         if panel.runModal() == 1:
             self._dest = panel.URLs()[0].path()
-            self._destLabel.setStringValue_(f"Destinație: {self._dest}")
+            self._renderDest()
 
-    def preview_(self, sender):
+    @objc.python_method
+    def _renderDest(self):
         lib = self._app.activeLibrary()
-        if lib is None or not self._dest:
-            self._summary.setStringValue_("Alege biblioteca și destinația întâi.")
+        if not self._dest or lib is None:
+            self._destPath.setStringValue_("Nicio destinație aleasă.")
+            self._destInfo.setStringValue_("")
+            self._destFit.setStringValue_("")
             return
-        self._summary.setStringValue_("Calculez planul…")
+        from AppKit import NSFileManager
         dest = self._dest
+        try:
+            vol_name = NSFileManager.defaultManager()\
+                .componentsToDisplayForPath_(dest)[0]
+        except Exception:
+            vol_name = Path(dest).anchor or dest
+        self._destPath.setStringValue_(dest)
+        self._destInfo.setStringValue_("Calculez planul și spațiul…")
+        self._destFit.setStringValue_("")
 
         def work():
             try:
-                plan = copier.plan_copy([lib], Path(dest))
+                plan = copier.plan_copy(
+                    [lib], Path(dest), normalize_names=self._normalize,
+                    selected_crate_keys=self._sel_keys,
+                    include_unsorted=self._include_unsorted)
                 free = copier.free_space(Path(dest))
-                req = copier.estimate_required_bytes(plan, Path(dest),
-                                                     lib.serato_dir)
+                sdir = lib.serato_dir if self._db_mode == "copy" else None
+                req = copier.estimate_required_bytes(plan, Path(dest), sdir)
             except Exception:
-                self._app.log_("Eroare previzualizare:\n" + traceback.format_exc(), "error", "migrate")
-                AppHelper.callAfter(self._summary.setStringValue_, "Eroare la previzualizare (vezi Jurnal).")
+                self._app.log_("Eroare plan migrare:\n" + traceback.format_exc(),
+                               "error", "migrate")
+                AppHelper.callAfter(self._destInfo.setStringValue_,
+                                    "Eroare la calcul (vezi Jurnal).")
                 return
-            AppHelper.callAfter(self._planReady_, plan, req, free)
+            AppHelper.callAfter(self._destReady_, plan, req, free, str(vol_name))
 
         threading.Thread(target=work, daemon=True).start()
 
     @objc.python_method
-    def _planReady_(self, plan, req, free):
+    def _destReady_(self, plan, req, free, vol_name):
         self._plan = plan
-        fit = "✓ Încape" if (free is None or req <= free) else "✕ NU ÎNCAPE"
-        self._summary.setStringValue_(
-            f"{plan.primary_count} copii · {plan.link_count} hardlink-uri · "
-            f"{_human(plan.total_bytes)} · necesar ~{_human(req)}"
-            + (f" · liber {_human(free)}" if free else "") + f"   {fit}")
-        self._app.log_(f"Plan migrare: {plan.primary_count} fișiere, {_human(plan.total_bytes)}", "info", "migrate")
+        self._required = req
+        self._free = free
+        self._destInfo.setStringValue_(
+            f"Volum:               {vol_name}\n"
+            f"Spațiu disponibil:   {theme.human_size(free) if free is not None else '—'}\n"
+            f"Spațiu necesar:      {theme.human_size(req)}")
+        if free is None:
+            self._destFit.setStringValue_("• Spațiul liber nu a putut fi determinat")
+            self._destFit.setTextColor_(theme.secondary_label())
+        elif req <= free:
+            self._destFit.setStringValue_("✓ Spațiu suficient")
+            self._destFit.setTextColor_(theme.ok_color())
+        else:
+            self._destFit.setStringValue_(
+                f"✕ NU ÎNCAPE — lipsesc ~{theme.human_size(req - free)}")
+            self._destFit.setTextColor_(theme.error_color())
+
+    # ================================================== step 2 — Opțiuni
+    @objc.python_method
+    def _buildOptions(self):
+        p = self._panel(2)
+        st = NSStackView.alloc().initWithFrame_(p.bounds())
+        st.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        st.setAlignment_(1)
+        st.setSpacing_(6)
+        st.setEdgeInsets_((6, 0, 6, 0))
+        st.setAutoresizingMask_(_AUTOSIZE)
+        p.addSubview_(st)
+        add = st.addArrangedSubview_
+
+        add(theme.make_label("STRUCTURA BAZEI DE DATE", style="caption",
+                             color=NSColor.tertiaryLabelColor()))
+        self._rbFresh = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
+        self._rbFresh.setButtonType_(4)  # radio
+        self._rbFresh.setTitle_("Generează bază de date nouă (doar ce migrez)")
+        self._rbFresh.setState_(1)
+        self._rbFresh.setTarget_(self); self._rbFresh.setAction_(b"pickFresh:")
+        add(self._rbFresh)
+        add(theme.make_label(
+            "Un „_Serato_” nou la destinație, doar cu track-urile și crate-urile alese. Originalul nu e citit decât pentru metadata.",
+            style="caption", color=theme.secondary_label()))
+        self._rbCopy = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
+        self._rbCopy.setButtonType_(4)
+        self._rbCopy.setTitle_("Copiază „_Serato_” + rescrie căile")
+        self._rbCopy.setTarget_(self); self._rbCopy.setAction_(b"pickCopy:")
+        add(self._rbCopy)
+        add(theme.make_label(
+            "Copiază baza de date existentă la destinație și rescrie căile către noua locație (necesită o singură bibliotecă).",
+            style="caption", color=theme.secondary_label()))
+        add(_spacer(10))
+
+        add(theme.make_label("FIȘIERE", style="caption", color=NSColor.tertiaryLabelColor()))
+        self._chkNorm = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
+        self._chkNorm.setButtonType_(NSSwitchButton)
+        self._chkNorm.setTitle_("Normalizează numele SCRISE CU MAJUSCULE")
+        self._chkNorm.setState_(1)
+        self._chkNorm.setTarget_(self); self._chkNorm.setAction_(b"toggleNorm:")
+        add(self._chkNorm)
+        add(_spacer(10))
+
+        add(theme.make_label("SIGURANȚĂ", style="caption", color=NSColor.tertiaryLabelColor()))
+        self._chkBackup = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
+        self._chkBackup.setButtonType_(NSSwitchButton)
+        self._chkBackup.setTitle_("Creează backup înainte de migrare")
+        self._chkBackup.setState_(1)
+        self._chkBackup.setTarget_(self); self._chkBackup.setAction_(b"toggleBackup:")
+        add(self._chkBackup)
+        add(theme.make_label(
+            "Scrie un „Serato DB - <bibliotecă> - <dată>.zip” lângă destinație înainte de orice copiere (folosește exportul de bază de date existent).",
+            style="caption", color=theme.secondary_label()))
+
+    def pickFresh_(self, sender):
+        self._db_mode = "fresh"
+        self._rbFresh.setState_(1); self._rbCopy.setState_(0)
+
+    def pickCopy_(self, sender):
+        self._db_mode = "copy"
+        self._rbCopy.setState_(1); self._rbFresh.setState_(0)
+
+    def toggleNorm_(self, sender):
+        self._normalize = self._chkNorm.state() == 1
+
+    def toggleBackup_(self, sender):
+        self._backup = self._chkBackup.state() == 1
+
+    # ================================================== step 3 — Verificare
+    @objc.python_method
+    def _buildReview(self):
+        p = self._panel(3)
+        self._reviewText = NSTextView.alloc().initWithFrame_(p.bounds())
+        self._reviewText.setEditable_(False)
+        self._reviewText.setDrawsBackground_(False)
+        self._reviewText.setFont_(NSFont.systemFontOfSize_(13))
+        self._reviewText.setAutoresizingMask_(_AUTOSIZE)
+        p.addSubview_(self._reviewText)
+
+    @objc.python_method
+    def _backupName(self, lib):
+        from datetime import date
+        return f"Serato DB - {lib.name} - {date.today().isoformat()}.zip"
+
+    @objc.python_method
+    def _renderReview(self):
+        lib = self._app.activeLibrary()
+        if lib is None or not self._dest:
+            self._reviewText.setString_("Revino la pașii anteriori — lipsește biblioteca sau destinația.")
+            self._nextBtn.setEnabled_(False)
+            return
+        self._reviewText.setString_("Pregătesc rezumatul…")
+        self._nextBtn.setEnabled_(False)
+        dest = self._dest
+        norm, keys, unsorted = self._normalize, self._sel_keys, self._include_unsorted
+        sdir = lib.serato_dir if self._db_mode == "copy" else None
+
+        def work():
+            try:
+                plan = copier.plan_copy([lib], Path(dest), normalize_names=norm,
+                                        selected_crate_keys=keys,
+                                        include_unsorted=unsorted)
+                req = copier.estimate_required_bytes(plan, Path(dest), sdir)
+                free = copier.free_space(Path(dest))
+            except Exception:
+                self._app.log_("Eroare rezumat migrare:\n" + traceback.format_exc(),
+                               "error", "migrate")
+                AppHelper.callAfter(self._reviewText.setString_,
+                                    "Eroare la calcul (vezi Jurnal).")
+                return
+            AppHelper.callAfter(self._reviewReady_, plan, req, free)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _reviewReady_(self, plan, req, free):
+        lib = self._app.activeLibrary()
+        self._plan = plan
+        self._required = req
+        self._free = free
+        pl = plan
+        fits = self._free is None or self._required <= self._free
+        db_line = ("Generează una nouă, doar cu crate-urile alese"
+                   if self._db_mode == "fresh"
+                   else "Copiază „_Serato_” existent + rescrie căile")
+        lines = [
+            f"{lib.name}   ↓   {self._dest}",
+            "",
+            f"{theme.format_int(pl.primary_count)} fișiere de copiat · "
+            f"{theme.format_int(pl.link_count)} hard link-uri · {theme.human_size(pl.total_bytes)}",
+            "",
+            f"Spațiu necesar:      {theme.human_size(self._required)}",
+            f"Spațiu disponibil:   {theme.human_size(self._free) if self._free is not None else '—'}",
+            ("✓ Spațiu suficient" if fits else
+             f"✕ NU ÎNCAPE — lipsesc ~{theme.human_size(self._required - (self._free or 0))}"),
+            f"{'✓' if not pl.skipped_missing else '⚠'} {len(pl.skipped_missing)} fișiere lipsă (sărite)",
+            f"Bază de date:        {db_line}",
+            f"Nume:                {'Normalizate' if self._normalize else 'Nemodificate'}",
+            f"Backup:              {self._backupName(lib) if self._backup else '—'}",
+            "",
+            "Fișierele originale NU sunt șterse, mutate sau redenumite.",
+        ]
+        self._reviewText.setString_("\n".join(lines))
+        self._nextBtn.setEnabled_(True)
+
+    # ================================================== step 4 — Migrare
+    @objc.python_method
+    def _buildRun(self):
+        p = self._panel(4)
+        y = p.bounds().size.height
+        self._phase = theme.make_label("", style="headline")
+        self._phase.setFrame_(NSMakeRect(0, y - 26, p.bounds().size.width, 20))
+        self._phase.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._phase)
+        self._bar = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(0, y - 54, p.bounds().size.width, 16))
+        self._bar.setIndeterminate_(True)
+        self._bar.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._bar)
+        self._progLine = theme.make_label("", style="body")
+        self._progLine.setFrame_(NSMakeRect(0, y - 82, p.bounds().size.width, 18))
+        self._progLine.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._progLine)
+        self._curFile = theme.make_label("", style="secondary")
+        self._curFile.setFrame_(NSMakeRect(0, y - 104, p.bounds().size.width, 18))
+        self._curFile.setAutoresizingMask_(1 << 3 | 1 << 1)
+        self._curFile.setLineBreakMode_(4)
+        p.addSubview_(self._curFile)
+        self._etaLine = theme.make_label("", style="secondary")
+        self._etaLine.setFrame_(NSMakeRect(0, y - 126, p.bounds().size.width, 18))
+        self._etaLine.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._etaLine)
+
+    @objc.python_method
+    def _runLog(self, msg):
+        import time as _t
+        self._run_log.append(f"{_t.strftime('%H:%M:%S')}  {msg}")
+        self._app.log_(msg, "info", "migrate")
+
+    @objc.python_method
+    def _startMigration(self):
+        lib = self._app.activeLibrary()
+        if lib is None or not self._plan or not self._plan.operations:
+            _alert("Nimic de migrat.")
+            return
+        # doesn't-fit sheet
+        if self._free is not None and self._required > self._free:
+            a = NSAlert.alloc().init()
+            a.setMessageText_("NU ÎNCAPE pe destinație.")
+            a.setInformativeText_(
+                f"Necesar ~{theme.human_size(self._required)}, liber "
+                f"{theme.human_size(self._free)}. Copierea se va opri cu eroare "
+                f"când se umple discul. Continui totuși?")
+            a.addButtonWithTitle_("Continuă")
+            a.addButtonWithTitle_("Anulează")
+            if a.runModal() != 1000:
+                return
+        if self._db_mode in ("fresh", "copy") and scanner.is_serato_running():
+            a = NSAlert.alloc().init()
+            a.setMessageText_("Serato DJ Pro rulează.")
+            a.setInformativeText_("Închide Serato înainte de a scrie baza de date "
+                                  "la destinație, altfel poate suprascrie schimbările.")
+            a.addButtonWithTitle_("Am închis, continuă")
+            a.addButtonWithTitle_("Anulează")
+            if a.runModal() != 1000:
+                return
+        a = NSAlert.alloc().init()
+        a.setMessageText_(
+            f"Se copiază {self._plan.primary_count} fișiere "
+            f"({theme.human_size(self._plan.total_bytes)}) plus "
+            f"{self._plan.link_count} hard link-uri.")
+        a.setInformativeText_("Fișierele originale NU sunt șterse. Continui?")
+        a.addButtonWithTitle_("Începe")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+
+        self._run_log = []
+        import time as _t
+        self._t0 = _t.time()
+        self._go(4)
+        self._bar.startAnimation_(None)
+        self._app._beginBusy_("migrare")
+        plan = self._plan
+        dest_root = Path(self._dest)
+        db_mode = self._db_mode
+        do_backup = self._backup
+        backup_name = self._backupName(lib)
+
+        def cb(done, total, op):
+            AppHelper.callAfter(self._progress_, done, total, str(op.dest_path.name))
+
+        def work():
+            err = None
+            try:
+                if do_backup:
+                    AppHelper.callAfter(self._phaseTo_, "Backup bază de date")
+                    copier.export_database(lib, dest_root / backup_name)
+                    AppHelper.callAfter(self._runLog, f"Backup scris: {backup_name}")
+                AppHelper.callAfter(self._phaseTo_, "Copiere fișiere")
+                AppHelper.callAfter(self._bar.setIndeterminate_, False)
+                copier.execute_plan(plan, progress_callback=cb)
+                AppHelper.callAfter(self._runLog, "Fișiere copiate")
+                if db_mode == "fresh":
+                    AppHelper.callAfter(self._phaseTo_, "Bază de date nouă")
+                    AppHelper.callAfter(self._bar.setIndeterminate_, True)
+                    copier.write_fresh_serato([lib], plan, dest_root / "_Serato_", dest_root)
+                    AppHelper.callAfter(self._runLog, "Bază de date nouă generată")
+                else:
+                    AppHelper.callAfter(self._phaseTo_, "Copiere „_Serato_”")
+                    AppHelper.callAfter(self._bar.setIndeterminate_, True)
+                    dsd = copier.copy_serato_folder(lib, dest_root)
+                    AppHelper.callAfter(self._runLog, "Folder „_Serato_” copiat")
+                    AppHelper.callAfter(self._phaseTo_, "Rescriere căi")
+                    copier.rewrite_serato_database(lib, plan, dsd, dest_root)
+                    AppHelper.callAfter(self._runLog, "Căi rescrise")
+            except Exception:
+                err = traceback.format_exc()
+            AppHelper.callAfter(self._migrationDone_, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _phaseTo_(self, name):
+        self._phase.setStringValue_(name)
+        self._runLog(name)
+
+    @objc.python_method
+    def _progress_(self, done, total, name):
+        import time as _t
+        frac = (done / total) if total else 0
+        self._bar.setMinValue_(0.0)
+        self._bar.setMaxValue_(float(total or 1))
+        self._bar.setDoubleValue_(float(done))
+        self._progLine.setStringValue_(
+            f"Copiere {theme.format_int(done)} / {theme.format_int(total)} fișiere · {frac*100:.0f}%")
+        self._curFile.setStringValue_(name)
+        el = _t.time() - self._t0
+        eta = ""
+        if done > 30 and frac > 0:
+            rem = el / frac - el
+            eta = f" · rămas ~{int(rem//60)}m {int(rem%60)}s"
+        self._etaLine.setStringValue_(
+            f"Timp scurs: {int(el//60)}m {int(el%60)}s{eta}")
+
+    @objc.python_method
+    def _migrationDone_(self, err):
+        self._bar.stopAnimation_(None)
+        self._app._endBusy_("migrare")
+        if err:
+            self._runLog("EROARE: " + err.strip().splitlines()[-1])
+            self._app.log_("Migrare eșuată:\n" + err, "error", "migrate")
+            _alert("Migrarea a eșuat.", informative="Vezi Jurnal pentru detalii.")
+            self._go(3)
+            return
+        self._go(5)
+
+    # ================================================== step 5 — Verificare-post
+    @objc.python_method
+    def _buildPostVerify(self):
+        p = self._panel(5)
+        self._pvText = NSTextView.alloc().initWithFrame_(p.bounds())
+        self._pvText.setEditable_(False)
+        self._pvText.setDrawsBackground_(False)
+        self._pvText.setFont_(NSFont.systemFontOfSize_(13))
+        self._pvText.setAutoresizingMask_(_AUTOSIZE)
+        p.addSubview_(self._pvText)
+
+    @objc.python_method
+    def _renderPostVerify(self):
+        self._pvText.setString_("Verific rezultatul migrării…")
+        self._nextBtn.setEnabled_(False)
+        plan = self._plan
+        dest_root = Path(self._dest)
+        import time as _t
+        dur = _t.time() - self._t0
+
+        def work():
+            files_ok = files_bad = 0
+            failures = []
+            for op in plan.operations:
+                if not op.is_primary:
+                    continue
+                try:
+                    if op.dest_path.exists() and \
+                       op.dest_path.stat().st_size == op.source_path.stat().st_size:
+                        files_ok += 1
+                    else:
+                        files_bad += 1
+                        failures.append(f"{op.source_path.name}: dimensiune diferită / lipsă")
+                except OSError as e:
+                    files_bad += 1
+                    failures.append(f"{op.source_path.name}: {e}")
+            db_ok = False
+            db_count = 0
+            try:
+                import serato_db as _sdb
+                dbp = dest_root / "_Serato_" / "database V2"
+                if dbp.is_file():
+                    tracks = _sdb.parse_database(dbp, str(dest_root))
+                    db_count = len(tracks)
+                    db_ok = db_count > 0
+            except Exception:
+                db_ok = False
+            AppHelper.callAfter(self._pvReady_, files_ok, files_bad, failures,
+                                db_ok, db_count, dur)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _pvReady_(self, ok, bad, failures, db_ok, db_count, dur):
+        lib = self._app.activeLibrary()
+        crates_n = len(self._sel_keys) if self._sel_keys is not None else \
+            (len(lib.crates) if lib else 0)
+        self._verify = (ok, bad, failures, db_ok, db_count, dur)
+        dm = f"{int(dur//60)}m {int(dur%60)}s"
+        if bad == 0 and db_ok:
+            txt = [
+                "Migrare finalizată",
+                "",
+                f"✓ {theme.format_int(ok)} fișiere copiate și verificate ({theme.format_int(ok)} / {theme.format_int(ok)})",
+                f"✓ {theme.format_int(crates_n)} crate-uri migrate",
+                f"✓ Baza de date poate fi citită ({theme.format_int(db_count)} track-uri)",
+                "",
+                f"Durată: {dm}",
+            ]
+        else:
+            txt = [
+                "Migrare finalizată cu avertismente",
+                "",
+                f"{theme.format_int(ok)} reușite · {theme.format_int(bad)} eșuate",
+                ("✓ Baza de date poate fi citită" if db_ok
+                 else "⚠ Baza de date nouă nu a putut fi citită"),
+                "",
+                f"Durată: {dm}",
+            ]
+        self._pvText.setString_("\n".join(txt))
+        self._nextBtn.setEnabled_(True)
+        if failures:
+            self._runLog(f"Verificare-post: {bad} eșuate")
+
+    # ================================================== step 6 — Complet
+    @objc.python_method
+    def _buildComplete(self):
+        p = self._panel(6)
+        y = p.bounds().size.height
+        self._doneMsg = theme.make_label("Migrare completă.", style="title2")
+        self._doneMsg.setFrame_(NSMakeRect(0, y - 30, p.bounds().size.width, 24))
+        self._doneMsg.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._doneMsg)
+        self._doneSub = theme.make_label("", style="secondary")
+        self._doneSub.setFrame_(NSMakeRect(0, y - 54, p.bounds().size.width, 18))
+        self._doneSub.setAutoresizingMask_(1 << 3 | 1 << 1)
+        p.addSubview_(self._doneSub)
+        rb = _button("Deschide în Finder", self, b"revealDest:")
+        rb.setFrame_(NSMakeRect(0, y - 96, 170, 28))
+        rb.setAutoresizingMask_(1 << 3)
+        p.addSubview_(rb)
+        lb = _button("Vezi jurnalul acestei migrări", self, b"showRunLog:")
+        lb.setFrame_(NSMakeRect(180, y - 96, 240, 28))
+        lb.setAutoresizingMask_(1 << 3)
+        p.addSubview_(lb)
+
+    @objc.python_method
+    def _renderComplete(self):
+        if self._verify:
+            ok, bad, _f, db_ok, db_count, dur = self._verify
+            self._doneMsg.setStringValue_(
+                "Migrare completă" if bad == 0 and db_ok
+                else "Migrare completă (cu avertismente)")
+            self._doneSub.setStringValue_(
+                f"{theme.format_int(ok)} fișiere la {self._dest}")
+
+    def revealDest_(self, sender):
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        if self._dest:
+            NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+                [NSURL.fileURLWithPath_(self._dest)])
+
+    def showRunLog_(self, sender):
+        _alert("Jurnalul acestei migrări",
+               informative="\n".join(self._run_log) or "(gol)")
 
 
 # ------------------------------------------------------------------- Metadata
