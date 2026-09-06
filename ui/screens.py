@@ -1264,28 +1264,63 @@ class _FlippedView(NSView):
 
 
 class _DropView(NSView):
-    """Plain NSView that accepts folder drops and forwards them to a screen."""
+    """NSView that accepts folder drops, highlights on hover and forwards the
+    drop to a screen's handleFolderDrop_."""
 
     def initWithFrame_(self, frame):
         self = objc.super(_DropView, self).initWithFrame_(frame)
         if self is None:
             return None
         self._screen = None
+        self._hi = False
         return self
 
     def setScreen_(self, s):
         self._screen = s
 
+    def _folderInPasteboard_(self, sender):
+        from Foundation import NSURL
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None)
+        for u in (urls or []):
+            p = u.path()
+            if p and Path(p).is_dir():
+                return True
+        return False
+
     def draggingEntered_(self, sender):
-        return 1  # NSDragOperationCopy
+        if self._folderInPasteboard_(sender):
+            self._hi = True
+            self.setNeedsDisplay_(True)
+            return 1  # NSDragOperationCopy
+        return 0
+
+    def draggingExited_(self, sender):
+        self._hi = False
+        self.setNeedsDisplay_(True)
 
     def prepareForDragOperation_(self, sender):
-        return True
+        return self._folderInPasteboard_(sender)
 
     def performDragOperation_(self, sender):
+        self._hi = False
+        self.setNeedsDisplay_(True)
         if self._screen is not None:
             return bool(self._screen.handleFolderDrop_(sender))
         return False
+
+    def drawRect_(self, rect):
+        objc.super(_DropView, self).drawRect_(rect)
+        if not self._hi:
+            return
+        from AppKit import NSBezierPath, NSColor
+        b = self.bounds()
+        inset = ((b[0][0] + 4, b[0][1] + 4), (b[1][0] - 8, b[1][1] - 8))
+        p = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(inset, 8, 8)
+        NSColor.controlAccentColor().colorWithAlphaComponent_(0.12).setFill()
+        p.fill()
+        NSColor.controlAccentColor().setStroke()
+        p.setLineWidth_(2)
+        p.stroke()
 
 
 # ------------------------------------------------------------------- Orphans
@@ -1795,8 +1830,8 @@ class MigrateScreen(BaseScreen):
             self._go(0)
 
     @objc.python_method
-    def _panel(self, key, top=0):
-        p = NSView.alloc().initWithFrame_(self._pager.bounds())
+    def _panel(self, key, cls=NSView):
+        p = cls.alloc().initWithFrame_(self._pager.bounds())
         p.setAutoresizingMask_(_AUTOSIZE)
         p.setHidden_(True)
         self._pager.addSubview_(p)
@@ -1934,12 +1969,19 @@ class MigrateScreen(BaseScreen):
     # ================================================== step 1 — Destinație
     @objc.python_method
     def _buildDest(self):
-        p = self._panel(1)
+        p = self._panel(1, cls=_DropView)
+        p.setScreen_(self)
+        p.registerForDraggedTypes_(["public.file-url", "NSFilenamesPboardType"])
         y = p.bounds().size.height
         b = _button("Alege destinația…", self, b"chooseDest:")
         b.setFrame_(NSMakeRect(0, y - 40, 180, 30))
         b.setAutoresizingMask_(1 << 3)
         p.addSubview_(b)
+        hint = theme.make_label("… sau trage un folder / volum aici",
+                                style="caption", color=theme.tertiary_label())
+        hint.setFrame_(NSMakeRect(190, y - 34, 320, 16))
+        hint.setAutoresizingMask_(1 << 3)
+        p.addSubview_(hint)
         self._destPath = theme.make_label("Nicio destinație aleasă.", style="body")
         self._destPath.setFrame_(NSMakeRect(0, y - 76, p.bounds().size.width, 18))
         self._destPath.setAutoresizingMask_(1 << 3 | 1 << 1)
@@ -1963,6 +2005,20 @@ class MigrateScreen(BaseScreen):
         if panel.runModal() == 1:
             self._dest = panel.URLs()[0].path()
             self._renderDest()
+
+    def handleFolderDrop_(self, sender):
+        from Foundation import NSURL
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None)
+        for u in (urls or []):
+            p = u.path()
+            if p and Path(p).is_dir():
+                self._dest = p
+                if self._step != 1:
+                    self._go(1)
+                else:
+                    self._renderDest()
+                return True
+        return False
 
     @objc.python_method
     def _renderDest(self):
