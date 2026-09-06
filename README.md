@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.7.0-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.7.1-blue?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS-000000?style=for-the-badge&logo=apple" alt="macOS">
   <img src="https://img.shields.io/badge/UI-AppKit%20%2F%20PyObjC-1f6feb?style=for-the-badge&logo=apple&logoColor=white" alt="AppKit">
   <img src="https://img.shields.io/badge/python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.13">
@@ -46,6 +46,7 @@ mod întunecat + accent de sistem. Vechiul UI Tkinter e păstrat la
 | 📏 **Verificare spațiu** | La previzualizare calculează cât spațiu îi trebuie pe destinație (copii + hardlink-uri cross-volum + folderul `_Serato_`) și **avertizează dacă nu încape**, cu confirmare explicită. |
 | ✅ **Selecție crate-uri** | Alegi exact ce crate-uri migrezi (arbore cu bife, mărime per crate + total live) — util când biblioteca întreagă nu încape pe discul destinație. |
 | 🏷️ **Metadata** | Găsește track-uri unde artistul lipsește (sau e îngropat în titlu, gen „Artist - Titlu"), permite revizuirea și corecția, plus editare individuală sau de grup a Artist / Titlu / Album / Gen. Scrie atât în baza de date Serato cât și în tag-urile ID3 (`mutagen`). |
+| ✏️ **Redenumire** | Normalizează în bloc numele fișierelor (elimină `_`, numere de la început, etichete `(official video)` / `[www…]`, MAJUSCULE → Title Case) și **rescrie căile** din `database V2` și din crate-uri, cu backup înainte. Preview obligatoriu. |
 | 🛡️ **Siguranță** | Blochează scrierile cât timp Serato DJ Pro rulează; cere confirmare la închidere și nu se închide în timpul unei operațiuni. |
 
 ---
