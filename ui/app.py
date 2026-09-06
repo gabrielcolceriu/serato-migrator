@@ -530,15 +530,21 @@ class AppDelegate(NSObject):
         app_menu.addItemWithTitle_action_keyEquivalent_(
             f"Închide {APP_NAME}", b"terminate:", "q")
 
-        # Bibliotecă menu
-        lib_item = NSMenuItem.alloc().init()
-        mainmenu.addItem_(lib_item)
-        lib_menu = NSMenu.alloc().initWithTitle_("Bibliotecă")
-        lib_item.setSubmenu_(lib_menu)
-        m = lib_menu.addItemWithTitle_action_keyEquivalent_("Rescanează", b"rescanLibraries:", "r")
+        # Fișier menu
+        file_item = NSMenuItem.alloc().init()
+        mainmenu.addItem_(file_item)
+        file_menu = NSMenu.alloc().initWithTitle_("Fișier")
+        file_item.setSubmenu_(file_menu)
+        m = file_menu.addItemWithTitle_action_keyEquivalent_(
+            "Alege bibliotecă…", b"chooseLibraryMenu:", "o")
         m.setTarget_(self)
+        m = file_menu.addItemWithTitle_action_keyEquivalent_(
+            "Exportă baza de date…", b"exportDatabaseMenu:", "")
+        m.setTarget_(self)
+        file_menu.addItem_(NSMenuItem.separatorItem())
+        file_menu.addItemWithTitle_action_keyEquivalent_("Închide fereastra", b"performClose:", "w")
 
-        # Editare (standard)
+        # Editare (standard) + Găsește
         edit_item = NSMenuItem.alloc().init()
         mainmenu.addItem_(edit_item)
         edit_menu = NSMenu.alloc().initWithTitle_("Editare")
@@ -549,6 +555,21 @@ class AppDelegate(NSObject):
         for title, sel, key in (("Decupează", b"cut:", "x"), ("Copiază", b"copy:", "c"),
                                  ("Lipește", b"paste:", "v"), ("Selectează tot", b"selectAll:", "a")):
             edit_menu.addItemWithTitle_action_keyEquivalent_(title, sel, key)
+        edit_menu.addItem_(NSMenuItem.separatorItem())
+        m = edit_menu.addItemWithTitle_action_keyEquivalent_("Găsește", b"focusSearch:", "f")
+        m.setTarget_(self)
+
+        # Bibliotecă menu
+        lib_item = NSMenuItem.alloc().init()
+        mainmenu.addItem_(lib_item)
+        lib_menu = NSMenu.alloc().initWithTitle_("Bibliotecă")
+        lib_item.setSubmenu_(lib_menu)
+        for title, sel, key in (("Rescanează / reîmprospătează", b"refreshCurrent:", "r"),
+                                ("Verifică fișiere lipsă", b"menuVerifyMissing:", ""),
+                                ("Reconstruiește baza de date", b"menuRebuildDb:", ""),
+                                ("Scanează după orfane", b"menuScanOrphans:", "")):
+            it = lib_menu.addItemWithTitle_action_keyEquivalent_(title, sel, key)
+            it.setTarget_(self)
 
         # Vizualizare
         view_item = NSMenuItem.alloc().init()
@@ -573,7 +594,79 @@ class AppDelegate(NSObject):
         win_menu.addItemWithTitle_action_keyEquivalent_("Zoom", b"performZoom:", "")
         NSApp().setWindowsMenu_(win_menu)
 
+        # Ajutor
+        help_item = NSMenuItem.alloc().init()
+        mainmenu.addItem_(help_item)
+        help_menu = NSMenu.alloc().initWithTitle_("Ajutor")
+        help_item.setSubmenu_(help_menu)
+        hm = help_menu.addItemWithTitle_action_keyEquivalent_(
+            f"Ghid {APP_NAME}", b"openGuide:", "")
+        hm.setTarget_(self)
+        NSApp().setHelpMenu_(help_menu)
+
         NSApp().setMainMenu_(mainmenu)
+
+    # --- menu actions that route to the current screen ---
+    @objc.python_method
+    def _currentVC(self):
+        return getattr(self._router, "_vcs", {}).get(self.currentDestination())
+
+    @objc.python_method
+    def _vc(self, dest):
+        if self._router is None:
+            return None
+        vcs = getattr(self._router, "_vcs", {})
+        if dest not in vcs:
+            self.selectDestination_(dest)
+            if self._wc is not None:
+                self._wc.selectSidebarRowForDestination_(dest)
+        return vcs.get(dest)
+
+    def focusSearch_(self, sender):
+        vc = self._currentVC()
+        if vc is not None and hasattr(vc, "focusSearch"):
+            vc.focusSearch()
+
+    def chooseLibraryMenu_(self, sender):
+        vc = self._vc("libraries")
+        if vc is not None and hasattr(vc, "chooseLibrary_"):
+            vc.chooseLibrary_(sender)
+
+    def exportDatabaseMenu_(self, sender):
+        vc = self._vc("libraries")
+        if vc is not None and hasattr(vc, "exportDB_"):
+            if hasattr(vc, "_selected_root") and not vc._selected_root:
+                lib = self.activeLibrary()
+                if lib is not None:
+                    vc._selected_root = str(lib.volume_root)
+            vc.exportDB_(sender)
+
+    def menuVerifyMissing_(self, sender):
+        vc = self._vc("libraries")
+        if vc is not None and hasattr(vc, "verifyMissing_"):
+            lib = self.activeLibrary()
+            if lib is not None and hasattr(vc, "_selected_root"):
+                vc._selected_root = str(lib.volume_root)
+            vc.verifyMissing_(sender)
+
+    def menuRebuildDb_(self, sender):
+        vc = self._vc("libraries")
+        if vc is not None and hasattr(vc, "rebuildDB_"):
+            lib = self.activeLibrary()
+            if lib is not None and hasattr(vc, "_selected_root"):
+                vc._selected_root = str(lib.volume_root)
+            vc.rebuildDB_(sender)
+
+    def menuScanOrphans_(self, sender):
+        vc = self._vc("orphans")
+        if vc is not None and hasattr(vc, "scan_"):
+            vc.scan_(sender)
+
+    def openGuide_(self, sender):
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        NSWorkspace.sharedWorkspace().openURL_(
+            NSURL.URLWithString_("https://github.com/gabrielcolceriu/serato-migrator#readme"))
 
     def showAbout_(self, sender):
         opts = {

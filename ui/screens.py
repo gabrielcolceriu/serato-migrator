@@ -1053,6 +1053,10 @@ class CratesScreen(BaseScreen):
     def librariesChanged(self):
         self.render()
 
+    @objc.python_method
+    def focusSearch(self):
+        self._search.window().makeFirstResponder_(self._search)
+
     # ---- render / data ----
     def render(self):
         lib = self._app.activeLibrary()
@@ -1549,6 +1553,11 @@ class OrphansScreen(BaseScreen):
         self._applyResultsFilter()
 
     @objc.python_method
+    def focusSearch(self):
+        if self._state == "results":
+            self._oSearch.window().makeFirstResponder_(self._oSearch)
+
+    @objc.python_method
     def _applyResultsFilter(self):
         q = self._oSearch.stringValue().lower()
         self._filtered = sorted(
@@ -1683,9 +1692,10 @@ class MigrateScreen(BaseScreen):
         self._sel_keys = None       # None = all crates; else set[str(crate.file_path)]
         self._include_unsorted = True
         self._dest = ""
+        from . import state as _state
         self._db_mode = "fresh"     # "fresh" | "copy"
-        self._normalize = True
-        self._backup = True
+        self._normalize = _state.get_bool(_state.K_DEFAULT_NORMALIZE_NAMES)
+        self._backup = _state.get_bool(_state.K_BACKUP_BEFORE_MIGRATE)
         self._plan = None
         self._required = 0
         self._free = None
@@ -2050,7 +2060,7 @@ class MigrateScreen(BaseScreen):
         self._chkNorm = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
         self._chkNorm.setButtonType_(NSSwitchButton)
         self._chkNorm.setTitle_("Normalizează numele SCRISE CU MAJUSCULE")
-        self._chkNorm.setState_(1)
+        self._chkNorm.setState_(1 if self._normalize else 0)
         self._chkNorm.setTarget_(self); self._chkNorm.setAction_(b"toggleNorm:")
         add(self._chkNorm)
         add(_spacer(10))
@@ -2059,7 +2069,7 @@ class MigrateScreen(BaseScreen):
         self._chkBackup = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 560, 20))
         self._chkBackup.setButtonType_(NSSwitchButton)
         self._chkBackup.setTitle_("Creează backup înainte de migrare")
-        self._chkBackup.setState_(1)
+        self._chkBackup.setState_(1 if self._backup else 0)
         self._chkBackup.setTarget_(self); self._chkBackup.setAction_(b"toggleBackup:")
         add(self._chkBackup)
         add(theme.make_label(
@@ -2504,6 +2514,10 @@ class MetadataScreen(BaseScreen):
     def librariesChanged(self):
         self._reload()
 
+    @objc.python_method
+    def focusSearch(self):
+        self._search.window().makeFirstResponder_(self._search)
+
     # ---- Track Inspector for a single selection (UI-15) ----
     @objc.python_method
     def _ensureInspector(self):
@@ -2879,6 +2893,11 @@ class JournalScreen(BaseScreen):
 
     def searchChanged_(self, sender):
         self.journalChanged()
+
+    @objc.python_method
+    def focusSearch(self):
+        if not self._search.isHidden():
+            self._search.window().makeFirstResponder_(self._search)
 
     @objc.python_method
     def _rawText(self):
