@@ -223,17 +223,21 @@ class TrackInspector(NSObject):
         if self._track is None or self._lib is None:
             return
         edits = {}
+        prev = {}
         for key, tag, _lbl in _FIELDS:
             new = self._edits[key].stringValue().strip()
             old = (getattr(self._track, key) or "")
             if new != old:
                 edits[tag] = new
+                prev[tag] = old
         if not edits:
             self._app.log_("Metadata: nicio schimbare de salvat", "info", "metadata")
             return
         raw = self._track.raw_path
         write_id3 = self._id3.state() == 1
         lib = self._lib
+        self._pending_undo = (str(lib.volume_root), {raw: prev}, write_id3,
+                              f"editare {Path(self._track.abs_path).name}")
         self._saveBtn.setEnabled_(False)
         self._app.log_(
             f"Salvez metadata pentru {Path(self._track.abs_path).name}…",
@@ -258,6 +262,10 @@ class TrackInspector(NSObject):
         # reflect the new values on the in-memory Track so the row + inspector agree
         for key, _tag, _lbl in _FIELDS:
             setattr(self._track, key, self._edits[key].stringValue().strip() or None)
+        pu = getattr(self, "_pending_undo", None)
+        if pu is not None and hasattr(self._app, "pushMetaUndo"):
+            self._app.pushMetaUndo(*pu)
+            self._pending_undo = None
         self._app.log_("Metadata salvată", "info", "metadata")
         if callable(self._on_saved):
             try:
