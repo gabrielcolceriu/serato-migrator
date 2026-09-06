@@ -12,6 +12,7 @@ OPTIONS = {
     "packages": ["mutagen", "ui"],
     "includes": [
         "objc", "Foundation", "AppKit", "PyObjCTools", "PyObjCTools.AppHelper",
+        "renamer",
     ],
     "plist": {
         "CFBundleName": "Serato Migrator",

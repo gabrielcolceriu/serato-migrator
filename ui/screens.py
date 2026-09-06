@@ -3149,6 +3149,217 @@ class JournalScreen(BaseScreen):
         self.journalChanged()
 
 
+# ------------------------------------------------------------------- Redenumire
+class RenameScreen(BaseScreen):
+    """Normalizare în bloc a numelor de fișiere + rescrierea căilor în
+    database V2 și în crate-uri (via renamer.py). Preview obligatoriu."""
+
+    _DEFAULT_ON = {"underscores", "tracknum", "spaces"}
+
+    def build_(self, v):
+        import renamer
+        self._renamer = renamer
+        self._plan = None
+        self._headerInto_title_subtitle_(
+            v, "Redenumire",
+            "Normalizează numele fișierelor și rescrie căile în baza Serato")
+        y = v.bounds().size.height
+
+        self._ruleChecks = {}
+        yy = y - 92
+        for key, label, _fn in renamer.RULES:
+            cb = NSButton.alloc().initWithFrame_(NSMakeRect(24, yy, 520, 20))
+            cb.setButtonType_(NSSwitchButton)
+            cb.setTitle_(label)
+            cb.setState_(1 if key in self._DEFAULT_ON else 0)
+            cb.setTarget_(self); cb.setAction_(b"ruleChanged:")
+            cb.setAutoresizingMask_(1 << 3)  # stick to top
+            v.addSubview_(cb)
+            self._ruleChecks[key] = cb
+            yy -= 22
+
+        self._prevBtn = _button("Previzualizează", self, b"preview:")
+        self._prevBtn.setFrame_(NSMakeRect(24, yy - 6, 150, 28))
+        self._prevBtn.setAutoresizingMask_(1 << 3)
+        v.addSubview_(self._prevBtn)
+        self._info = theme.make_label("", style="secondary")
+        self._info.setFrame_(NSMakeRect(186, yy - 2, 600, 18))
+        self._info.setAutoresizingMask_(1 << 3 | 1 << 1)
+        v.addSubview_(self._info)
+
+        body = self._bodyContainerIn_(v, top=104 + len(renamer.RULES) * 22 + 34)
+        self._tv, self._ds, scroll = _table(
+            ["old", "new"], ["Nume actual", "Nume nou"], [420, 420])
+        scroll.setFrame_(NSMakeRect(0, 40, body.bounds().size.width,
+                                    body.bounds().size.height - 40))
+        scroll.setAutoresizingMask_(_AUTOSIZE)
+        body.addSubview_(scroll)
+        self._applyBtn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 4, 280, 30))
+        self._applyBtn.setBezelStyle_(NSBezelStyleRounded)
+        self._applyBtn.setTitle_("Redenumește")
+        self._applyBtn.setEnabled_(False)
+        self._applyBtn.setTarget_(self); self._applyBtn.setAction_(b"applyRenames:")
+        body.addSubview_(self._applyBtn)
+        self._empty = _empty_state("textformat", "Nicio previzualizare",
+                                   "Alege regulile și apasă Previzualizează.")
+        self._empty.setFrame_(NSMakeRect(20, body.bounds().size.height / 2 - 50,
+                                         body.bounds().size.width - 40, 120))
+        self._empty.setAutoresizingMask_(1 << 3 | 1 << 1)
+        body.addSubview_(self._empty)
+
+        from Foundation import NSNotificationCenter
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"selChanged:", "NSTableViewSelectionDidChangeNotification", self._tv)
+
+    def didBecomeVisible(self):
+        pass
+
+    def librariesChanged(self):
+        self._plan = None
+        self._ds.setData_([])
+        self._tv.reloadData()
+        self._applyBtn.setEnabled_(False)
+        self._info.setStringValue_("")
+        self._empty.setHidden_(False)
+
+    @objc.python_method
+    def _selectedRules(self):
+        return {k for k, cb in self._ruleChecks.items() if cb.state() == 1}
+
+    def ruleChanged_(self, sender):
+        self._plan = None
+        self._applyBtn.setEnabled_(False)
+
+    def preview_(self, sender):
+        lib = self._app.activeLibrary()
+        if lib is None:
+            _alert("Nicio bibliotecă activă.")
+            return
+        rules = self._selectedRules()
+        if not rules:
+            _alert("Bifează cel puțin o regulă.")
+            return
+        self._prevBtn.setEnabled_(False)
+        self._info.setStringValue_("Calculez…")
+        self._app._beginBusy_("rename-preview")
+        self._app.setOperationStatus_("Se calculează redenumirile…")
+
+        def work():
+            try:
+                plan = self._renamer.plan_renames(lib, rules)
+                err = None
+            except Exception:
+                plan, err = None, traceback.format_exc()
+            AppHelper.callAfter(self._previewDone_, plan, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _previewDone_(self, plan, err):
+        self._app._endBusy_("rename-preview")
+        self._prevBtn.setEnabled_(True)
+        if err:
+            self._app.log_("Eroare previzualizare redenumire:\n" + err, "error", "rename")
+            _alert("Previzualizarea a eșuat (vezi Jurnal).")
+            return
+        self._plan = plan
+        self._ds.setData_([(op.old_abs.name, op.new_abs.name) for op in plan.ops])
+        self._tv.reloadData()
+        self._empty.setHidden_(bool(plan.ops))
+        self._info.setStringValue_(
+            f"{theme.format_int(len(plan.ops))} redenumiri · "
+            f"{theme.format_int(len(plan.skipped))} sărite")
+        self._applyBtn.setEnabled_(bool(plan.ops))
+        self._updateApplyTitle()
+
+    def selChanged_(self, note):
+        self._updateApplyTitle()
+
+    @objc.python_method
+    def _updateApplyTitle(self):
+        if not self._plan or not self._plan.ops:
+            return
+        n = self._tv.selectedRowIndexes().count() or len(self._plan.ops)
+        self._applyBtn.setTitle_(f"Redenumește {theme.format_int(n)} fișiere")
+
+    @objc.python_method
+    def _selectedOps(self):
+        idx = self._tv.selectedRowIndexes()
+        if not idx.count():
+            return list(self._plan.ops)
+        out = []
+        i = idx.firstIndex()
+        while i != _NSNotFound:
+            if 0 <= i < len(self._plan.ops):
+                out.append(self._plan.ops[i])
+            i = idx.indexGreaterThanIndex_(i)
+        return out
+
+    def applyRenames_(self, sender):
+        lib = self._app.activeLibrary()
+        if lib is None or not self._plan or not self._plan.ops:
+            return
+        ops = self._selectedOps()
+        if not ops:
+            return
+        if scanner.is_serato_running():
+            _alert("Serato DJ Pro rulează.",
+                   informative="Închide Serato înainte de a rescrie baza de date.")
+            return
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"Redenumești {len(ops)} fișiere pe disc?")
+        a.setInformativeText_(
+            "Se face întâi un backup la „_Serato_”. Fișierele sunt redenumite "
+            "efectiv pe disc, iar căile din „database V2” și din crate-uri sunt "
+            "rescrise ca Serato să le găsească. Ireversibil (în afară de backup).")
+        a.addButtonWithTitle_("Redenumește")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+        sub = self._renamer.RenamePlan(ops=ops, skipped=[])
+        self._applyBtn.setEnabled_(False)
+        self._app._beginBusy_("rename")
+        self._app.log_(f"Redenumesc {len(ops)} fișiere…", "info", "rename")
+
+        def prog(done, total):
+            AppHelper.callAfter(self._app.setOperationStatus_,
+                                f"Redenumire {theme.format_int(done)} / {theme.format_int(total)}")
+
+        def work():
+            try:
+                res = self._renamer.execute_renames(lib, sub, progress_cb=prog)
+                err = None
+            except Exception:
+                res, err = None, traceback.format_exc()
+            AppHelper.callAfter(self._applyDone_, res, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _applyDone_(self, res, err):
+        self._app._endBusy_("rename")
+        if err:
+            self._app.log_("Eroare la redenumire:\n" + err, "error", "rename")
+            _alert("Redenumirea a eșuat (vezi Jurnal).")
+            return
+        self._app.log_(
+            f"Redenumire: {res.renamed} fișiere, {res.crates_updated} crate-uri "
+            f"actualizate, backup {res.backup_dir}"
+            + (f", {len(res.failed)} eșecuri" if res.failed else ""),
+            "warn" if res.failed else "info", "rename")
+        _alert(f"{res.renamed} fișiere redenumite",
+               informative=(f"{res.crates_updated} crate-uri actualizate · "
+                            f"bază de date {'rescrisă' if res.db_updated else 'neatinsă'}\n"
+                            + (f"{len(res.failed)} eșecuri (vezi Jurnal)\n" if res.failed else "")
+                            + f"Backup: {res.backup_dir}"))
+        self._plan = None
+        self._ds.setData_([])
+        self._tv.reloadData()
+        self._empty.setHidden_(False)
+        self._applyBtn.setEnabled_(False)
+        self._app.rescanLibraries_(None)
+
+
 _SCREENS = {
     "overview": OverviewScreen,
     "libraries": LibrariesScreen,
@@ -3156,6 +3367,7 @@ _SCREENS = {
     "orphans": OrphansScreen,
     "migrate": MigrateScreen,
     "metadata": MetadataScreen,
+    "rename": RenameScreen,
     "journal": JournalScreen,
 }
 
