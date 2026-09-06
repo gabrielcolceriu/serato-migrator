@@ -15,10 +15,11 @@ import objc
 from AppKit import (
     NSColor, NSFont, NSTextField, NSView, NSViewController, NSScrollView,
     NSTableView, NSTableColumn, NSButton, NSBezelStyleRounded, NSStackView,
-    NSUserInterfaceLayoutOrientationVertical, NSTextView, NSOpenPanel,
+    NSUserInterfaceLayoutOrientationVertical,
+    NSUserInterfaceLayoutOrientationHorizontal, NSTextView, NSOpenPanel,
     NSProgressIndicator, NSProgressIndicatorBarStyle, NSSearchField,
     NSImageView, NSPopUpButton, NSAlert, NSAttributedString,
-    NSForegroundColorAttributeName, NSFontAttributeName,
+    NSForegroundColorAttributeName, NSFontAttributeName, NSLayoutConstraint,
 )
 from Foundation import NSObject, NSMakeRect, NSDate, NSIndexSet
 from PyObjCTools import AppHelper
@@ -80,8 +81,28 @@ def _alert(message, *, informative=None, style=0):
     a.runModal()
 
 
+import re as _re
+
+
+def _sort_key(value, numeric):
+    if numeric:
+        m = _re.search(r"-?[\d][\d.,]*", str(value))
+        if not m:
+            return float("-inf")
+        raw = m.group().replace(".", "").replace(",", ".")
+        try:
+            return float(raw)
+        except ValueError:
+            return float("-inf")
+    return str(value).lower()
+
+
 class _Rows(NSObject):
-    """Generic NSTableView data source over a list of tuples + column keys."""
+    """Generic NSTableView data source over a list of tuples + column keys.
+
+    Click-to-sort headers: declare the numeric column identifiers via
+    ``setNumericColumns_`` so `23.100` sorts as a number, not a string.
+    """
 
     def initWithColumns_(self, columns):
         self = objc.super(_Rows, self).init()
@@ -89,13 +110,32 @@ class _Rows(NSObject):
             return None
         self._columns = list(columns)   # list of identifiers
         self._data = []                 # list[tuple]
+        self._numeric = set()
+        self._sort = None               # (identifier, ascending)
         return self
+
+    def setNumericColumns_(self, idents):
+        self._numeric = set(idents)
 
     def setData_(self, data):
         self._data = list(data)
+        self._applySort()
 
     def data(self):
         return self._data
+
+    @objc.python_method
+    def _applySort(self):
+        if not self._sort:
+            return
+        ident, asc = self._sort
+        try:
+            i = self._columns.index(ident)
+        except ValueError:
+            return
+        numeric = ident in self._numeric
+        self._data.sort(key=lambda row: _sort_key(row[i], numeric),
+                        reverse=not asc)
 
     def numberOfRowsInTableView_(self, tv):
         return len(self._data)
@@ -107,24 +147,59 @@ class _Rows(NSObject):
         except Exception:
             return ""
 
+    def tableView_sortDescriptorsDidChange_(self, tv, old):
+        sd = tv.sortDescriptors()
+        if sd and len(sd):
+            d = sd[0]
+            self._sort = (str(d.key()), bool(d.ascending()))
+            self._applySort()
+            tv.reloadData()
 
-def _table(columns, titles, widths):
+
+def _table(columns, titles, widths, *, numeric=(), sortable=True):
+    from Foundation import NSSortDescriptor
     tv = NSTableView.alloc().initWithFrame_(NSMakeRect(0, 0, 600, 400))
-    tv.setUsesAlternatingRowBackgroundColors_(True)
     tv.setRowSizeStyle_(1)
     tv.setAllowsMultipleSelection_(True)
-    for ident, title, w in zip(columns, titles, widths):
+    tv.setUsesAlternatingRowBackgroundColors_(False)
+    tv.setGridStyleMask_(0)
+    tv.setIntercellSpacing_((3, 2))
+    try:
+        tv.setStyle_(1)  # NSTableViewStyleFullWidth — plain, no heavy chrome
+    except Exception:
+        pass
+    right = {"Track-uri", "Disponibile", "Lipsă", "Crate-uri", "Mărime"}
+    # the widest text column absorbs slack; numeric columns never do
+    _fill = max((i for i, t in enumerate(titles) if t not in right),
+                key=lambda i: widths[i], default=len(columns) - 1)
+    for idx, (ident, title, w) in enumerate(zip(columns, titles, widths)):
         c = NSTableColumn.alloc().initWithIdentifier_(ident)
         c.setTitle_(title)
         c.setWidth_(w)
+        c.setMinWidth_(28)
+        c.setResizingMask_(2 if idx == _fill else 1)
         c.headerCell().setStringValue_(title)
+        if sortable:
+            c.setSortDescriptorPrototype_(
+                NSSortDescriptor.sortDescriptorWithKey_ascending_(ident, True))
+        if title in right or ident in numeric:
+            try:
+                c.headerCell().setAlignment_(2)  # right
+                c.dataCell().setAlignment_(2)
+                c.dataCell().setFont_(
+                    NSFont.monospacedDigitSystemFontOfSize_weight_(12, 0))
+            except Exception:
+                pass
         tv.addTableColumn_(c)
     ds = _Rows.alloc().initWithColumns_(columns)
+    if numeric:
+        ds.setNumericColumns_(numeric)
     tv.setDataSource_(ds)
     scroll = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 600, 400))
     scroll.setDocumentView_(tv)
     scroll.setHasVerticalScroller_(True)
-    scroll.setBorderType_(1)  # bezel; refined in UI-03
+    scroll.setBorderType_(0)  # no outer border (HIG)
+    scroll.setDrawsBackground_(False)
     scroll.setAutoresizingMask_(_AUTOSIZE)
     return tv, ds, scroll
 
@@ -327,16 +402,45 @@ class LibrariesScreen(BaseScreen):
     def build_(self, v):
         self._headerInto_title_subtitle_(v, "Biblioteci", "Biblioteci Serato detectate pe acest Mac")
         self._summary = _label("", secondary=True)
-        self._summary.setFrame_(NSMakeRect(24, v.bounds().size.height - 100, 800, 18))
+        self._summary.setFrame_(NSMakeRect(24, v.bounds().size.height - 100, 900, 18))
         self._summary.setAutoresizingMask_(1 << 3)
         v.addSubview_(self._summary)
+
+        # empty state (no library)
+        self._empty = NSStackView.alloc().initWithFrame_(NSMakeRect(24, 120, 520, 140))
+        self._empty.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        self._empty.setAlignment_(1)
+        self._empty.setSpacing_(8)
+        self._empty.setAutoresizingMask_(1 << 3)
+        self._empty.addArrangedSubview_(
+            theme.make_label("Nu a fost detectată nicio bibliotecă Serato.", style="title2"))
+        self._empty.addArrangedSubview_(theme.make_label(
+            "Conectează un volum cu un folder _Serato_ sau alege manual unul.",
+            style="secondary"))
+        self._empty.addArrangedSubview_(_button("Alege bibliotecă…", self, b"chooseLibrary:"))
+        self._empty.setHidden_(True)
+        v.addSubview_(self._empty)
+
         body = self._bodyContainerIn_(v, top=118)
         self._tv, self._ds, scroll = _table(
-            ["name", "root", "tracks", "present", "missing", "crates"],
-            ["Bibliotecă", "Locație", "Track-uri", "Disponibile", "Lipsă", "Crate-uri"],
-            [160, 300, 90, 100, 80, 90])
+            ["name", "root", "tracks", "present", "missing", "crates", "health"],
+            ["Bibliotecă", "Locație", "Track-uri", "Disponibile", "Lipsă", "Crate-uri", "Stare"],
+            [150, 230, 90, 100, 70, 90, 300],
+            numeric=("tracks", "present", "missing", "crates"))
+        self._tv.setAllowsMultipleSelection_(False)
+        self._tv.setTarget_(self)
+        self._tv.setDoubleAction_(b"revealSelected:")
+        self._scroll = scroll
         scroll.setFrame_(body.bounds())
         body.addSubview_(scroll)
+
+        from Foundation import NSNotificationCenter
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"rowSelected:", "NSTableViewSelectionDidChangeNotification", self._tv)
+
+        self._buildContextMenu()
+        self._inspector = None
+        self._selected_root = None
         self.render()
 
     def didBecomeVisible(self):
@@ -348,19 +452,360 @@ class LibrariesScreen(BaseScreen):
     def refresh(self):
         self._app.rescanLibraries_(None)
 
+    # ---- data ----
+    @objc.python_method
+    def _rowsFor(self, libs):
+        from . import health as _health
+        out = []
+        for l in libs:
+            h = _health.library_health(l, scanning=self._app.isBusy())
+            mark = {"ok": "✓", "scanning": "↻"}.get(h.key, "⚠")
+            out.append((l.name, str(l.volume_root),
+                        theme.format_int(len(l.tracks)),
+                        theme.format_int(len(l.present_tracks)),
+                        theme.format_int(len(l.missing_tracks)),
+                        theme.format_int(len(l.crates)),
+                        f"{mark} {h.label}"))
+        return out
+
     def render(self):
         libs = self._app.libraries()
-        rows = [(l.name, str(l.volume_root), theme.format_int(len(l.tracks)),
-                 theme.format_int(len(l.present_tracks)),
-                 theme.format_int(len(l.missing_tracks)),
-                 theme.format_int(len(l.crates))) for l in libs]
-        self._ds.setData_(rows)
+        empty = not libs
+        self._empty.setHidden_(not empty)
+        self._scroll.setHidden_(empty)
+        self._ds.setData_(self._rowsFor(libs))
         self._tv.reloadData()
         tot_tracks = sum(len(l.tracks) for l in libs)
+        tot_present = sum(len(l.present_tracks) for l in libs)
         tot_missing = sum(len(l.missing_tracks) for l in libs)
         tot_crates = sum(len(l.crates) for l in libs)
+        n = len(libs)
         self._summary.setStringValue_(
-            f"{len(libs)} Bibliotecă · {theme.format_int(tot_tracks)} Track-uri · {theme.format_int(tot_missing)} Lipsă · {theme.format_int(tot_crates)} Crate-uri")
+            "" if empty else
+            f"{n} {'Bibliotecă' if n == 1 else 'Biblioteci'} · "
+            f"{theme.format_int(tot_tracks)} Track-uri · "
+            f"{theme.format_int(tot_present)} Disponibile · "
+            f"{theme.format_int(tot_missing)} Lipsă · "
+            f"{theme.format_int(tot_crates)} Crate-uri")
+        self._restoreSelection()
+
+    # ---- selection <-> active library + inspector ----
+    @objc.python_method
+    def _libAtRow(self, row):
+        data = self._ds.data()
+        if not (0 <= row < len(data)):
+            return None
+        root = data[row][1]
+        for l in self._app.libraries():
+            if str(l.volume_root) == root:
+                return l
+        return None
+
+    @objc.python_method
+    def _restoreSelection(self):
+        if not self._selected_root:
+            return
+        data = self._ds.data()
+        for i, r in enumerate(data):
+            if r[1] == self._selected_root:
+                self._tv.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(i), False)
+                return
+
+    def rowSelected_(self, note):
+        lib = self._libAtRow(self._tv.selectedRow())
+        if lib is None:
+            self._selected_root = None
+        else:
+            self._selected_root = str(lib.volume_root)
+            self._app.setActiveLibraryRoot_(str(lib.volume_root))
+            self._ensureInspector().set_library(lib)
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
+
+    @objc.python_method
+    def _ensureInspector(self):
+        if self._inspector is None:
+            self._inspector = LibraryInspector.alloc().initWithScreen_(self)
+        return self._inspector
+
+    def inspectorView(self):
+        if not self._selected_root:
+            return None
+        return self._ensureInspector().view()
+
+    # ---- context menu ----
+    @objc.python_method
+    def _buildContextMenu(self):
+        from AppKit import NSMenu, NSMenuItem
+        m = NSMenu.alloc().init()
+        for title, sel in (
+            ("Deschide în Finder", b"revealSelected:"),
+            ("Rescanează", b"rescanAll:"),
+            ("Verifică fișiere lipsă", b"verifyMissing:"),
+            ("Reconstruiește baza de date", b"rebuildDB:"),
+            ("Exportă baza de date…", b"exportDB:"),
+        ):
+            it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+            it.setTarget_(self)
+            m.addItem_(it)
+        self._tv.setMenu_(m)
+
+    @objc.python_method
+    def _contextLib(self):
+        row = self._tv.clickedRow()
+        if row < 0:
+            row = self._tv.selectedRow()
+        return self._libAtRow(row)
+
+    # ---- actions ----
+    def chooseLibrary_(self, sender):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseDirectories_(True)
+        panel.setCanChooseFiles_(False)
+        panel.setPrompt_("Alege")
+        panel.setMessage_("Alege folderul rădăcină al bibliotecii (conține _Serato_)")
+        if panel.runModal() != 1:
+            return
+        root = panel.URLs()[0].path()
+        lib = scanner.load_library_at(root)
+        if lib is None:
+            _alert("Nu am găsit un folder _Serato_ valid în:\n" + root)
+            return
+        existing = [str(l.volume_root) for l in self._app.libraries()]
+        if str(lib.volume_root) not in existing:
+            self._app._libraries = list(self._app.libraries()) + [lib]
+        self._app.setActiveLibraryRoot_(str(lib.volume_root))
+        self._app.log_(f"Bibliotecă adăugată manual: {lib.name}", "info", "libraries")
+        self.render()
+
+    def revealSelected_(self, sender):
+        lib = self._contextLib()
+        if lib is None:
+            return
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+            [NSURL.fileURLWithPath_(str(lib.volume_root))])
+
+    def rescanAll_(self, sender):
+        self._app.rescanLibraries_(None)
+
+    def verifyMissing_(self, sender):
+        lib = self._contextLib()
+        if lib is None:
+            return
+        if not lib.missing_tracks:
+            _alert("Toate fișierele bibliotecii sunt prezente pe disc.",
+                   informative=lib.name)
+            return
+        self._app.log_(f"Caut fișierele lipsă din {lib.name} pe volum…", "info", "libraries")
+        self._app._beginBusy_("verify")
+
+        def work():
+            try:
+                found, still = scanner.find_missing_elsewhere(lib)
+                err = None
+            except Exception:
+                found, still, err = [], [], traceback.format_exc()
+            AppHelper.callAfter(self._missingDone_, lib.name, found, still, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _missingDone_(self, name, found, still, err):
+        self._app._endBusy_("verify")
+        if err:
+            self._app.log_("Eroare la verificarea fișierelor lipsă:\n" + err, "error", "libraries")
+            _alert("Verificarea a eșuat (vezi Jurnal).")
+            return
+        self._app.log_(
+            f"{name}: {len(found)} de recuperat prin redenumire, {len(still)} chiar lipsă",
+            "info", "libraries")
+        _alert(f"{name}",
+               informative=(f"{len(found)} fișiere găsite în altă parte pe volum "
+                            f"(mutate/reorganizate)\n{len(still)} chiar lipsesc de pe volum."))
+
+    def rebuildDB_(self, sender):
+        lib = self._contextLib()
+        if lib is None:
+            return
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"Reconstruiești baza de date pentru „{lib.name}”?")
+        a.setInformativeText_(
+            "Se face întâi un backup complet al folderului _Serato_. Baza nouă "
+            "păstrează doar track-urile ale căror fișiere există fizic pe disc. "
+            "Metadata per track e clonată din baza veche.")
+        a.addButtonWithTitle_("Reconstruiește")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+        self._app.log_(f"Reconstruiesc baza de date pentru {lib.name}…", "info", "libraries")
+        self._app._beginBusy_("rebuild")
+
+        def work():
+            try:
+                res = copier.rebuild_database_from_disk(lib)
+                err = None
+            except Exception:
+                res, err = None, traceback.format_exc()
+            AppHelper.callAfter(self._rebuildDone_, lib.name, res, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _rebuildDone_(self, name, res, err):
+        self._app._endBusy_("rebuild")
+        if err:
+            self._app.log_("Eroare la reconstrucția bazei de date:\n" + err, "error", "libraries")
+            _alert("Reconstrucția a eșuat (vezi Jurnal).")
+            return
+        self._app.log_(
+            f"{name}: bază reconstruită — {res.tracks_kept} track-uri păstrate, "
+            f"{res.tracks_dropped} eliminate, {res.crates_kept} crate-uri păstrate. "
+            f"Backup: {res.backup_dir}", "info", "libraries")
+        _alert(f"Bază de date reconstruită pentru „{name}”",
+               informative=(f"{res.tracks_kept} track-uri păstrate · "
+                            f"{res.tracks_dropped} eliminate\n"
+                            f"{res.crates_kept} crate-uri păstrate · "
+                            f"{res.crates_dropped} eliminate\n\n"
+                            f"Backup: {res.backup_dir}"))
+        self._app.rescanLibraries_(None)
+
+    def exportDB_(self, sender):
+        lib = self._contextLib()
+        if lib is None:
+            return
+        from AppKit import NSSavePanel
+        panel = NSSavePanel.savePanel()
+        panel.setNameFieldStringValue_(f"{lib.name} — Serato DB.zip")
+        panel.setPrompt_("Exportă")
+        if panel.runModal() != 1:
+            return
+        dest = panel.URL().path()
+        self._app.log_(f"Exportă baza de date {lib.name} → {dest}", "info", "libraries")
+        self._app._beginBusy_("export")
+
+        def work():
+            try:
+                n = copier.export_database(lib, Path(dest))
+                err = None
+            except Exception:
+                n, err = 0, traceback.format_exc()
+            AppHelper.callAfter(self._exportDone_, dest, n, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _exportDone_(self, dest, n, err):
+        self._app._endBusy_("export")
+        if err:
+            self._app.log_("Eroare la exportul bazei de date:\n" + err, "error", "libraries")
+            _alert("Exportul a eșuat (vezi Jurnal).")
+            return
+        self._app.log_(f"Export gata: {n} intrări → {dest}", "info", "libraries")
+        _alert("Bază de date exportată", informative=f"{n} intrări scrise în\n{dest}")
+
+
+class LibraryInspector(NSObject):
+    """Right-hand inspector for a selected library (UI-03)."""
+
+    def initWithScreen_(self, screen):
+        self = objc.super(LibraryInspector, self).init()
+        if self is None:
+            return None
+        self._screen = screen
+        self._app = screen._app
+        self._lib = None
+        self._build()
+        return self
+
+    def view(self):
+        return self._container
+
+    @objc.python_method
+    def set_library(self, lib):
+        from . import health as _health
+        self._lib = lib
+        if lib is None:
+            return
+        self._name.setStringValue_(lib.name)
+        self._rows["Locație"].setStringValue_(str(lib.volume_root))
+        self._rows["Track-uri"].setStringValue_(theme.format_int(len(lib.tracks)))
+        self._rows["Disponibile"].setStringValue_(theme.format_int(len(lib.present_tracks)))
+        self._rows["Lipsă"].setStringValue_(theme.format_int(len(lib.missing_tracks)))
+        self._rows["Crate-uri"].setStringValue_(theme.format_int(len(lib.crates)))
+        h = _health.library_health(lib, scanning=self._app.isBusy())
+        mark = {"ok": "✓", "scanning": "↻"}.get(h.key, "⚠")
+        self._rows["Stare"].setStringValue_(f"{mark} {h.label}")
+        self._rows["Stare"].setTextColor_(
+            theme.ok_color() if h.key == "ok"
+            else theme.secondary_label() if h.key == "scanning"
+            else theme.warn_color())
+        self._rows["Ultima scanare"].setStringValue_(
+            _health.last_scan_text(str(lib.volume_root)))
+
+    @objc.python_method
+    def _build(self):
+        container = NSView.alloc().initWithFrame_(NSMakeRect(0, 0, 280, 600))
+        container.setAutoresizingMask_(_AUTOSIZE)
+        self._container = container
+        stack = NSStackView.alloc().initWithFrame_(NSMakeRect(0, 0, 280, 600))
+        stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        stack.setAlignment_(1)
+        stack.setSpacing_(6)
+        stack.setEdgeInsets_((16, 16, 16, 16))
+        stack.setAutoresizingMask_(_AUTOSIZE)
+        container.addSubview_(stack)
+        add = stack.addArrangedSubview_
+
+        add(theme.make_label("BIBLIOTECĂ", style="caption",
+                             color=NSColor.tertiaryLabelColor()))
+        self._name = theme.make_label("", style="headline")
+        add(self._name)
+        add(_spacer(6))
+        self._rows = {}
+        for key in ("Locație", "Track-uri", "Disponibile", "Lipsă", "Crate-uri",
+                    "Stare", "Ultima scanare"):
+            row = NSStackView.alloc().init()
+            row.setOrientation_(NSUserInterfaceLayoutOrientationHorizontal)
+            row.setSpacing_(6)
+            row.setAlignment_(12)
+            cap = theme.make_label(key, style="caption", color=theme.secondary_label())
+            cap.setContentHuggingPriority_forOrientation_(252, 0)
+            cap.setContentCompressionResistancePriority_forOrientation_(750, 0)
+            cap.addConstraint_(
+                NSLayoutConstraint.constraintWithItem_attribute_relatedBy_toItem_attribute_multiplier_constant_(
+                    cap, 7, 0, None, 0, 1.0, 92.0))
+            val = theme.make_label("", style="callout")
+            val.setLineBreakMode_(4)  # truncate middle for paths
+            row.addArrangedSubview_(cap)
+            row.addArrangedSubview_(val)
+            add(row)
+            self._rows[key] = val
+        add(_spacer(12))
+        add(theme.make_label("ACȚIUNI", style="caption",
+                             color=NSColor.tertiaryLabelColor()))
+        for title, sel in (
+            ("Deschide în Finder", b"revealSelected:"),
+            ("Rescanează", b"rescanAll:"),
+            ("Verifică fișiere lipsă", b"verifyMissing:"),
+            ("Reconstruiește baza de date", b"rebuildDB:"),
+            ("Exportă baza de date…", b"exportDB:"),
+        ):
+            add(self._link_(title, sel))
+
+    @objc.python_method
+    def _link_(self, title, sel):
+        b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 240, 18))
+        b.setBordered_(False)
+        b.setButtonType_(7)
+        b.setAttributedTitle_(NSAttributedString.alloc().initWithString_attributes_(
+            title, {NSForegroundColorAttributeName: NSColor.linkColor(),
+                    NSFontAttributeName: NSFont.systemFontOfSize_(12)}))
+        b.setTarget_(self._screen)
+        b.setAction_(sel)
+        return b
 
 
 # ------------------------------------------------------------------- Crates
