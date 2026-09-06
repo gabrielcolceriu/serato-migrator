@@ -4,7 +4,7 @@ and rollback during the UI redesign (see docs/UI_REDESIGN_2026.md).
 """
 from __future__ import annotations
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.7.0"
 
 
 def _build_app_icon(size: int = 128):

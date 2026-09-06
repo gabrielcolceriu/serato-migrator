@@ -5,8 +5,9 @@
 </p>
 
 <p align="center">
-  <img src="https://img.shields.io/badge/version-0.4.0-blue?style=for-the-badge" alt="Version">
+  <img src="https://img.shields.io/badge/version-0.7.0-blue?style=for-the-badge" alt="Version">
   <img src="https://img.shields.io/badge/platform-macOS-000000?style=for-the-badge&logo=apple" alt="macOS">
+  <img src="https://img.shields.io/badge/UI-AppKit%20%2F%20PyObjC-1f6feb?style=for-the-badge&logo=apple&logoColor=white" alt="AppKit">
   <img src="https://img.shields.io/badge/python-3.13-3776AB?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.13">
   <img src="https://img.shields.io/badge/status-neoficial-lightgrey?style=for-the-badge" alt="Neoficial">
 </p>
@@ -17,6 +18,20 @@
   <strong>migrează / reorganizează</strong> track-urile pe un disc nou (în foldere numite după
   crate-uri), cu tot cu baza de date — noua locație e utilizabilă fără „Locate Missing Files" manual.
 </p>
+
+---
+
+## 🖥️ Interfață nativă macOS
+
+De la **0.7.0**, UI-ul e rescris complet în **AppKit / PyObjC** (HIG Tahoe): bară laterală
+grupată în stil „source list", toolbar unificat cu titlul, layout pe trei coloane
+(bară laterală · conținut · inspector contextual), ecran **Prezentare**, **Migrare** ca flux
+ghidat în 7 pași (Sursă → Destinație → Opțiuni → Verificare → Migrare → Verificare-post →
+Complet) cu backup înainte de copiere și verificare read-only după, **Jurnal** cu vederi
+Activitate + Raw, meniuri contextuale, drag & drop, paletă de comenzi (⌘K), Setări (⌘,),
+mod întunecat + accent de sistem. Vechiul UI Tkinter e păstrat la
+[`legacy/gui_tk.py`](legacy/gui_tk.py); logica (`serato_db` / `scanner` / `copier` /
+`metadata_editor`) e neschimbată. Detalii: [`docs/UI_REDESIGN_2026.md`](docs/UI_REDESIGN_2026.md).
 
 ---
 
@@ -41,7 +56,7 @@
 python3 main.py
 ```
 
-Necesită Python 3.13 și `mutagen` (`pip3 install mutagen`).
+Necesită Python 3.13, `mutagen` și `pyobjc` (`pip3 install mutagen pyobjc-framework-Cocoa`).
 
 ---
 
