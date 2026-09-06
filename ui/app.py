@@ -274,10 +274,12 @@ class MainWindowController(NSWindowController):
     def toolbar_itemForItemIdentifier_willBeInsertedIntoToolbar_(self, tb, ident, flag):
         item = NSToolbarItem.alloc().initWithItemIdentifier_(ident)
         if ident == "toggleSidebar":
-            item.setLabel_("Sidebar")
+            item.setLabel_("Bară laterală")
+            item.setToolTip_("Ascunde sau arată bara laterală  (⌘⌥S)")
             b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 34, 26))
             b.setBezelStyle_(NSBezelStyleRounded)
             b.setTitle_("☰")
+            b.setToolTip_("Ascunde sau arată bara laterală  (⌘⌥S)")
             b.setTarget_(self)
             b.setAction_(b"toggleSidebar:")
             item.setView_(b)
@@ -286,9 +288,11 @@ class MainWindowController(NSWindowController):
             item.setView_(self._title_label)
         elif ident == "refresh":
             item.setLabel_("Reîmprospătează")
+            item.setToolTip_("Reîmprospătează ecranul curent  (⌘R)")
             b = NSButton.alloc().initWithFrame_(NSMakeRect(0, 0, 34, 26))
             b.setBezelStyle_(NSBezelStyleRounded)
             b.setTitle_("⟳")
+            b.setToolTip_("Reîmprospătează ecranul curent  (⌘R)")
             b.setTarget_(self._delegate)
             b.setAction_(b"refreshCurrent:")
             item.setView_(b)
