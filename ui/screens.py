@@ -2680,21 +2680,67 @@ class MetadataScreen(BaseScreen):
 
 
 # ------------------------------------------------------------------- Journal
+def _lvl_norm(level):
+    return "warn" if level in ("warn", "warning") else (level or "info")
+
+
+_LVL_ICON = {"info": "•", "warn": "⚠", "error": "✕"}
+
+
 class JournalScreen(BaseScreen):
     def build_(self, v):
+        self._mode = 0           # 0 Activitate, 1 Raw
+        self._sub = 0            # 0 Toate, 1 Info, 2 Avertismente, 3 Erori
         self._headerInto_title_subtitle_(v, "Jurnal", "Istoricul operațiunilor")
-        b = _button("Golește", self, b"clear:")
-        b.setFrame_(NSMakeRect(24, v.bounds().size.height - 110, 100, 26))
-        b.setAutoresizingMask_(1 << 3)
-        v.addSubview_(b)
-        body = self._bodyContainerIn_(v, top=128)
+        y = v.bounds().size.height
+
+        from AppKit import NSSegmentedControl
+        seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(24, y - 96, 220, 24))
+        seg.setSegmentCount_(2)
+        seg.setLabel_forSegment_("Activitate", 0)
+        seg.setLabel_forSegment_("Raw Log", 1)
+        seg.setWidth_forSegment_(110, 0)
+        seg.setWidth_forSegment_(110, 1)
+        seg.setSelectedSegment_(0)
+        seg.setTarget_(self); seg.setAction_(b"modeChanged:")
+        seg.setAutoresizingMask_(1 << 3)
+        self._seg = seg
+        v.addSubview_(seg)
+
+        sub = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(256, y - 96, 340, 24))
+        sub.setSegmentCount_(4)
+        for i, t in enumerate(("Toate", "Info", "Avertismente", "Erori")):
+            sub.setLabel_forSegment_(t, i)
+            sub.setWidth_forSegment_(84, i)
+        sub.setSelectedSegment_(0)
+        sub.setTarget_(self); sub.setAction_(b"subChanged:")
+        sub.setAutoresizingMask_(1 << 3)
+        self._subSeg = sub
+        v.addSubview_(sub)
+
+        self._search = NSSearchField.alloc().initWithFrame_(NSMakeRect(608, y - 96, 200, 24))
+        self._search.setPlaceholderString_("Caută")
+        self._search.setTarget_(self); self._search.setAction_(b"searchChanged:")
+        self._search.setAutoresizingMask_(1 << 3)
+        v.addSubview_(self._search)
+
+        cp = _button("Copiază", self, b"copyLog:")
+        cp.setFrame_(NSMakeRect(24, y - 132, 90, 26)); cp.setAutoresizingMask_(1 << 3)
+        v.addSubview_(cp); self._btnCopy = cp
+        cl = _button("Golește", self, b"clear:")
+        cl.setFrame_(NSMakeRect(120, y - 132, 90, 26)); cl.setAutoresizingMask_(1 << 3)
+        v.addSubview_(cl)
+        ex = _button("Export…", self, b"exportLog:")
+        ex.setFrame_(NSMakeRect(216, y - 132, 100, 26)); ex.setAutoresizingMask_(1 << 3)
+        v.addSubview_(ex)
+
+        body = self._bodyContainerIn_(v, top=152)
         scroll = NSScrollView.alloc().initWithFrame_(body.bounds())
         scroll.setHasVerticalScroller_(True)
-        scroll.setBorderType_(1)
+        scroll.setBorderType_(0)
         scroll.setAutoresizingMask_(_AUTOSIZE)
         self._text = NSTextView.alloc().initWithFrame_(body.bounds())
         self._text.setEditable_(False)
-        self._text.setFont_(NSFont.userFixedPitchFontOfSize_(12))
         self._text.setAutoresizingMask_(1 << 1)
         scroll.setDocumentView_(self._text)
         body.addSubview_(scroll)
@@ -2703,16 +2749,105 @@ class JournalScreen(BaseScreen):
     def didBecomeVisible(self):
         self.journalChanged()
 
-    def journalChanged(self):
-        lines = []
-        for entry in self._app.journal():
-            dt, level, op, msg = entry[0], entry[1], entry[2], entry[3]
+    def modeChanged_(self, sender):
+        self._mode = self._seg.selectedSegment()
+        raw = self._mode == 1
+        self._subSeg.setHidden_(raw)
+        self._search.setHidden_(raw)
+        self.journalChanged()
+
+    def subChanged_(self, sender):
+        self._sub = self._subSeg.selectedSegment()
+        self.journalChanged()
+
+    def searchChanged_(self, sender):
+        self.journalChanged()
+
+    @objc.python_method
+    def _rawText(self):
+        out = []
+        for e in self._app.journal():
+            dt, level, op, msg = e[0], _lvl_norm(e[1]), e[2], e[3]
             hhmm = dt.descriptionWithLocale_(None)[11:19]
-            mark = {"info": " ", "warning": "⚠", "error": "✕"}.get(level, " ")
+            mark = {"info": " ", "warn": "⚠", "error": "✕"}.get(level, " ")
             tag = f"[{op}] " if op else ""
-            lines.append(f"{hhmm} {mark} {tag}{msg}")
-        self._text.setString_("\n".join(lines))
+            out.append(f"{hhmm} {mark} {tag}{msg}")
+        return "\n".join(out)
+
+    @objc.python_method
+    def _activityText(self):
+        from datetime import datetime
+        q = self._search.stringValue().strip().lower()
+        want = {1: "info", 2: "warn", 3: "error"}.get(self._sub)
+        groups = []
+        cur_day = None
+        buf = []
+        today = datetime.now().date()
+        for e in self._app.journal():
+            dt, level, op, msg, detail = e[0], _lvl_norm(e[1]), e[2], e[3], (e[4] if len(e) > 4 else None)
+            if want and level != want:
+                continue
+            if q and q not in (msg or "").lower() and q not in (op or "").lower() \
+               and q not in (str(detail) or "").lower():
+                continue
+            iso = dt.descriptionWithLocale_(None)  # 'YYYY-MM-DD HH:MM:SS ...'
+            day = iso[:10]
+            hhmm = iso[11:16]
+            try:
+                d = datetime.strptime(day, "%Y-%m-%d").date()
+                label = ("ASTĂZI" if d == today
+                         else "IERI" if (today - d).days == 1
+                         else day)
+            except ValueError:
+                label = day
+            if label != cur_day:
+                if buf:
+                    groups.append("\n".join(buf))
+                buf = [label]
+                cur_day = label
+            icon = _LVL_ICON.get(level, "•")
+            oppart = f"  {op}" if op else ""
+            det = f"        {detail}" if detail else ""
+            buf.append(f"  {icon} {hhmm}{oppart}  {msg}{det}")
+        if buf:
+            groups.append("\n".join(buf))
+        return "\n\n".join(groups)
+
+    def journalChanged(self):
+        if not self._app.journal():
+            self._text.setString_("Nu există evenimente în jurnal.")
+            return
+        if self._mode == 1:
+            self._text.setFont_(NSFont.userFixedPitchFontOfSize_(12))
+            self._text.setString_(self._rawText())
+        else:
+            self._text.setFont_(NSFont.systemFontOfSize_(13))
+            txt = self._activityText()
+            self._text.setString_(txt or "Niciun eveniment pentru acest filtru.")
         self._text.scrollRangeToVisible_((len(self._text.string()), 0))
+
+    def copyLog_(self, sender):
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(
+            self._rawText() if self._mode == 1 else self._activityText(),
+            NSPasteboardTypeString)
+
+    def exportLog_(self, sender):
+        from AppKit import NSSavePanel
+        from datetime import datetime
+        panel = NSSavePanel.savePanel()
+        panel.setNameFieldStringValue_(
+            f"Serato Migrator - jurnal - {datetime.now():%Y-%m-%d %H%M}.txt")
+        panel.setPrompt_("Export")
+        if panel.runModal() != 1:
+            return
+        try:
+            Path(panel.URL().path()).write_text(self._rawText(), encoding="utf-8")
+            self._app.log_("Jurnal exportat", "info", "jurnal")
+        except Exception:
+            _alert("Exportul a eșuat.")
 
     def clear_(self, sender):
         self._app.clearJournal()
