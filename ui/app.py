@@ -642,6 +642,10 @@ class AppDelegate(NSObject):
             "Ascunde/Arată inspectorul", b"toggleInspector:", "i")
         mi2.setKeyEquivalentModifierMask_((1 << 20) | (1 << 19))
         mi2.setTarget_(self)
+        view_menu.addItem_(NSMenuItem.separatorItem())
+        mk = view_menu.addItemWithTitle_action_keyEquivalent_(
+            "Comenzi…", b"showCommandPalette:", "k")
+        mk.setTarget_(self)
 
         # Fereastră
         win_item = NSMenuItem.alloc().init()
@@ -725,6 +729,33 @@ class AppDelegate(NSObject):
         from Foundation import NSURL
         NSWorkspace.sharedWorkspace().openURL_(
             NSURL.URLWithString_("https://github.com/gabrielcolceriu/serato-migrator#readme"))
+
+    # --- command palette (UI-22) ---
+    def showCommandPalette_(self, sender):
+        from .command_palette import CommandPaletteController
+        if getattr(self, "_palette", None) is None:
+            self._palette = CommandPaletteController.alloc().initWithApp_(self)
+        self._palette.present(self._paletteCommands())
+
+    @objc.python_method
+    def _paletteCommands(self):
+        from .sidebar import NAV
+        cmds = []
+        for rid, label, _sym, is_group in NAV:
+            if is_group:
+                continue
+            cmds.append((f"Mergi la {label}",
+                         (lambda r=rid: (self.selectDestination_(r),
+                                         self._wc.selectSidebarRowForDestination_(r)
+                                         if self._wc else None))))
+        cmds += [
+            ("Rescanează bibliotecile", lambda: self.rescanLibraries_(None)),
+            ("Deschide Setări", lambda: self.showSettings_(None)),
+            ("Ascunde/Arată bara laterală", lambda: self.toggleSidebar_(None)),
+            ("Ascunde/Arată inspectorul", lambda: self.toggleInspector_(None)),
+            ("Anulează ultima editare de metadata", lambda: self.undoMetaEdit_(None)),
+        ]
+        return cmds
 
     def showAbout_(self, sender):
         opts = {
