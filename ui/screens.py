@@ -83,6 +83,44 @@ def _alert(message, *, informative=None, style=0):
     a.runModal()
 
 
+def _menu(target, items):
+    """items: list of (title, b"selector:") or (None, None) for a separator."""
+    from AppKit import NSMenu, NSMenuItem
+    m = NSMenu.alloc().init()
+    for title, sel in items:
+        if title is None:
+            m.addItem_(NSMenuItem.separatorItem())
+            continue
+        it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+        it.setTarget_(target)
+        m.addItem_(it)
+    return m
+
+
+_TRACK_MENU_ITEMS = [
+    ("Deschide în Finder", b"ctxReveal:"),
+    ("Editează metadata", b"ctxEditMeta:"),
+    (None, None),
+    ("Copiază calea", b"ctxCopyPath:"),
+    ("Rescanează", b"ctxRescan:"),
+]
+
+
+def _reveal_paths(paths):
+    from AppKit import NSWorkspace
+    from Foundation import NSURL
+    urls = [NSURL.fileURLWithPath_(p) for p in paths if p]
+    if urls:
+        NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(urls)
+
+
+def _copy_to_clipboard(text):
+    from AppKit import NSPasteboard, NSPasteboardTypeString
+    pb = NSPasteboard.generalPasteboard()
+    pb.clearContents()
+    pb.setString_forType_(text, NSPasteboardTypeString)
+
+
 import re as _re
 
 
@@ -959,18 +997,55 @@ class CratesScreen(BaseScreen):
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, b"trackSelected:", "NSTableViewSelectionDidChangeNotification", self._tracksTv)
 
-        # crate context menu
-        from AppKit import NSMenu, NSMenuItem
-        m = NSMenu.alloc().init()
-        for title, sel in (("Deschide folderul în Finder", b"revealCrate:"),
-                           ("Copiază căile track-urilor", b"copyCratePaths:"),
-                           ("Rescanează", b"rescanFromCrate:")):
-            it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
-            it.setTarget_(self)
-            m.addItem_(it)
-        self._outline.setMenu_(m)
+        # crate context menu (UI-17)
+        self._outline.setMenu_(_menu(self, [
+            ("Deschide folderul în Finder", b"revealCrate:"),
+            ("Copiază căile track-urilor", b"copyCratePaths:"),
+            (None, None),
+            ("Rescanează", b"rescanFromCrate:"),
+        ]))
+        # track context menu (UI-17)
+        self._tracksTv.setMenu_(_menu(self, _TRACK_MENU_ITEMS))
 
         self.render()
+
+    # ---- track context menu ----
+    @objc.python_method
+    def _ctxTrack(self):
+        row = self._tracksTv.clickedRow()
+        if row < 0:
+            row = self._tracksTv.selectedRow()
+        if 0 <= row < len(self._crate_tracks):
+            return self._crate_tracks[row]
+        return None
+
+    def ctxReveal_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _reveal_paths([t.abs_path])
+
+    def ctxEditMeta_(self, sender):
+        t = self._ctxTrack()
+        if t is None:
+            return
+        row = self._tracksTv.clickedRow()
+        if row >= 0:
+            self._tracksTv.selectRowIndexes_byExtendingSelection_(
+                NSIndexSet.indexSetWithIndex_(row), False)
+        self._selected_track = t
+        self._ensureInspector().set_track(self._app.activeLibrary(), t,
+                                          on_saved=self._trackEdited)
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
+
+    def ctxCopyPath_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _copy_to_clipboard(t.abs_path or "")
+            self._app.log_("Cale copiată", "info", "crates")
+
+    def ctxRescan_(self, sender):
+        self._app.rescanLibraries_(None)
 
     def didBecomeVisible(self):
         self.render()
@@ -2410,6 +2485,7 @@ class MetadataScreen(BaseScreen):
                                     body.bounds().size.height))
         scroll.setAutoresizingMask_(_AUTOSIZE)
         body.addSubview_(scroll)
+        self._tv.setMenu_(_menu(self, _TRACK_MENU_ITEMS))  # UI-17
         from Foundation import NSNotificationCenter
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, b"selChanged:", "NSTableViewSelectionDidChangeNotification", self._tv)
@@ -2442,6 +2518,39 @@ class MetadataScreen(BaseScreen):
         return self._ensureInspector().view()
 
     # ---- filtering ----
+    # ---- track context menu (UI-17) ----
+    @objc.python_method
+    def _ctxTrack(self):
+        row = self._tv.clickedRow()
+        if row < 0:
+            row = self._tv.selectedRow()
+        if 0 <= row < len(self._rows):
+            return self._rows[row]
+        return None
+
+    def ctxReveal_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _reveal_paths([t.abs_path])
+
+    def ctxEditMeta_(self, sender):
+        t = self._ctxTrack()
+        row = self._tv.clickedRow()
+        if t is None or row < 0:
+            return
+        self._tv.selectRowIndexes_byExtendingSelection_(
+            NSIndexSet.indexSetWithIndex_(row), False)
+        self.selChanged_(None)
+
+    def ctxCopyPath_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _copy_to_clipboard(t.abs_path or "")
+            self._app.log_("Cale copiată", "info", "metadata")
+
+    def ctxRescan_(self, sender):
+        self._app.rescanLibraries_(None)
+
     def filterChanged_(self, sender):
         self._reload()
 
