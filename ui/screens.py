@@ -21,7 +21,7 @@ from AppKit import (
     NSImageView, NSPopUpButton, NSAlert, NSAttributedString,
     NSForegroundColorAttributeName, NSFontAttributeName, NSLayoutConstraint,
 )
-from Foundation import NSObject, NSMakeRect, NSDate, NSIndexSet
+from Foundation import NSObject, NSMakeRect, NSDate, NSIndexSet, NSNotFound as _NSNotFound
 from PyObjCTools import AppHelper
 
 import scanner
@@ -263,7 +263,7 @@ class OverviewScreen(BaseScreen):
         self._stack.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
         self._stack.setAlignment_(1)  # leading
         self._stack.setSpacing_(10)
-        self._stack.setEdgeInsets_((46, 28, 28, 28))
+        self._stack.setEdgeInsets_((20, 28, 28, 28))
         self._stack.setAutoresizingMask_(_AUTOSIZE)
         v.addSubview_(self._stack)
         self.render()
@@ -1171,62 +1171,412 @@ class CratesScreen(BaseScreen):
         self._app.rescanLibraries_(None)
 
 
+class _DropView(NSView):
+    """Plain NSView that accepts folder drops and forwards them to a screen."""
+
+    def initWithFrame_(self, frame):
+        self = objc.super(_DropView, self).initWithFrame_(frame)
+        if self is None:
+            return None
+        self._screen = None
+        return self
+
+    def setScreen_(self, s):
+        self._screen = s
+
+    def draggingEntered_(self, sender):
+        return 1  # NSDragOperationCopy
+
+    def prepareForDragOperation_(self, sender):
+        return True
+
+    def performDragOperation_(self, sender):
+        if self._screen is not None:
+            return bool(self._screen.handleFolderDrop_(sender))
+        return False
+
+
 # ------------------------------------------------------------------- Orphans
 class OrphansScreen(BaseScreen):
-    def build_(self, v):
-        self._headerInto_title_subtitle_(v, "Fișiere orfane", "Fișiere audio de pe disc necunoscute de Serato")
-        self._info = _label("Alege o bibliotecă și scanează.", secondary=True)
-        self._info.setFrame_(NSMakeRect(24, v.bounds().size.height - 104, 700, 18))
-        self._info.setAutoresizingMask_(1 << 3)
-        v.addSubview_(self._info)
-        self._scanBtn = _button("Scanează după orfane", self, b"scan:")
-        self._scanBtn.setFrame_(NSMakeRect(24, v.bounds().size.height - 140, 200, 28))
-        self._scanBtn.setAutoresizingMask_(1 << 3)
-        v.addSubview_(self._scanBtn)
-        body = self._bodyContainerIn_(v, top=160)
-        self._tv, self._ds, scroll = _table(["path", "size"], ["Cale", "Mărime"], [640, 100])
-        scroll.setFrame_(body.bounds())
-        body.addSubview_(scroll)
+    """State-driven: BEFORE SCAN / SCANNING / NOTHING FOUND / RESULTS FOUND —
+    exactly one visible at a time."""
 
+    def build_(self, v):
+        self._state = "before"
+        self._scan_root = None
+        self._orphans = []      # list[(abs_path, location, size_bytes)]
+        self._filtered = []
+        self._headerInto_title_subtitle_(
+            v, "Fișiere orfane", "Fișiere audio de pe disc necunoscute de Serato")
+        self._body = _DropView.alloc().initWithFrame_(
+            NSMakeRect(24, 16, v.bounds().size.width - 48, v.bounds().size.height - 96 - 16))
+        self._body.setScreen_(self)
+        self._body.setAutoresizingMask_(_AUTOSIZE)
+        v.addSubview_(self._body)
+        self._body.registerForDraggedTypes_(["public.file-url", "NSFilenamesPboardType"])
+        self._panels = {}
+        self._buildBefore()
+        self._buildScanning()
+        self._buildNothing()
+        self._buildResults()
+        self.render()
+
+    def didBecomeVisible(self):
+        if self._state in ("before", "nothing"):
+            self._refreshLocations()
+
+    def librariesChanged(self):
+        if self._state == "before":
+            self._refreshLocations()
+
+    # ---- state switching ----
+    @objc.python_method
+    def _show(self, state):
+        self._state = state
+        for k, p in self._panels.items():
+            p.setHidden_(k != state)
+
+    def render(self):
+        self._refreshLocations()
+        self._show(self._state)
+
+    # ---- BEFORE ----
+    @objc.python_method
+    def _buildBefore(self):
+        p = NSView.alloc().initWithFrame_(self._body.bounds())
+        p.setAutoresizingMask_(_AUTOSIZE)
+        self._body.addSubview_(p)
+        self._panels["before"] = p
+        y = p.bounds().size.height
+        lbl = theme.make_label(
+            "Un fișier „orfan” e un fișier audio aflat pe disc, în folderul "
+            "bibliotecii, pe care Serato nu îl cunoaște (nu apare în „database "
+            "V2”). Scanarea compară fișierele de pe disc cu cele știute de Serato.",
+            style="body")
+        lbl.setFrame_(NSMakeRect(0, y - 72, 640, 60))
+        lbl.setAutoresizingMask_(1 << 3)
+        lbl.setLineBreakMode_(0)
+        lbl.setUsesSingleLineMode_(False)
+        p.addSubview_(lbl)
+        cap = theme.make_label("Locație de scanat", style="caption",
+                               color=theme.secondary_label())
+        cap.setFrame_(NSMakeRect(0, y - 104, 400, 16))
+        cap.setAutoresizingMask_(1 << 3)
+        p.addSubview_(cap)
+        self._loc = NSPopUpButton.alloc().initWithFrame_(NSMakeRect(0, y - 132, 420, 26))
+        self._loc.setAutoresizingMask_(1 << 3)
+        self._loc.setTarget_(self)
+        self._loc.setAction_(b"locChanged:")
+        p.addSubview_(self._loc)
+        browse = _button("Alege folder…", self, b"browseRoot:")
+        browse.setFrame_(NSMakeRect(430, y - 133, 130, 28))
+        browse.setAutoresizingMask_(1 << 3)
+        p.addSubview_(browse)
+        self._scanBtn = NSButton.alloc().initWithFrame_(NSMakeRect(0, y - 176, 160, 30))
+        self._scanBtn.setBezelStyle_(NSBezelStyleRounded)
+        self._scanBtn.setTitle_("Scanează")
+        self._scanBtn.setKeyEquivalent_("\r")
+        self._scanBtn.setTarget_(self)
+        self._scanBtn.setAction_(b"scan:")
+        self._scanBtn.setAutoresizingMask_(1 << 3)
+        p.addSubview_(self._scanBtn)
+
+    @objc.python_method
+    def _refreshLocations(self):
+        if not hasattr(self, "_loc"):
+            return
+        self._loc.removeAllItems()
+        roots = [str(l.volume_root) for l in self._app.libraries()]
+        for r in roots:
+            self._loc.addItemWithTitle_(r)
+        if self._scan_root and self._scan_root not in roots:
+            self._loc.addItemWithTitle_(self._scan_root)
+        if self._scan_root:
+            self._loc.selectItemWithTitle_(self._scan_root)
+        elif roots:
+            self._scan_root = roots[0]
+        self._scanBtn.setEnabled_(bool(self._loc.numberOfItems()))
+
+    def locChanged_(self, sender):
+        t = self._loc.titleOfSelectedItem()
+        if t:
+            self._scan_root = str(t)
+
+    def browseRoot_(self, sender):
+        panel = NSOpenPanel.openPanel()
+        panel.setCanChooseDirectories_(True)
+        panel.setCanChooseFiles_(False)
+        panel.setPrompt_("Alege")
+        if panel.runModal() == 1:
+            self._scan_root = panel.URLs()[0].path()
+            self._refreshLocations()
+
+    # ---- SCANNING ----
+    @objc.python_method
+    def _buildScanning(self):
+        p = NSView.alloc().initWithFrame_(self._body.bounds())
+        p.setAutoresizingMask_(_AUTOSIZE)
+        p.setHidden_(True)
+        self._body.addSubview_(p)
+        self._panels["scanning"] = p
+        y = p.bounds().size.height
+        self._spin = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(0, y - 60, 24, 24))
+        self._spin.setStyle_(1)  # spinning
+        self._spin.setAutoresizingMask_(1 << 3)
+        p.addSubview_(self._spin)
+        self._scanMsg = theme.make_label("Se scanează…", style="body")
+        self._scanMsg.setFrame_(NSMakeRect(34, y - 58, 560, 20))
+        self._scanMsg.setAutoresizingMask_(1 << 3)
+        p.addSubview_(self._scanMsg)
+        self._scanSub = theme.make_label("", style="secondary")
+        self._scanSub.setFrame_(NSMakeRect(34, y - 82, 560, 18))
+        self._scanSub.setAutoresizingMask_(1 << 3)
+        p.addSubview_(self._scanSub)
+
+    # ---- NOTHING FOUND ----
+    @objc.python_method
+    def _buildNothing(self):
+        p = NSStackView.alloc().initWithFrame_(self._body.bounds())
+        p.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+        p.setAlignment_(1)
+        p.setSpacing_(6)
+        p.setAutoresizingMask_(_AUTOSIZE)
+        p.setHidden_(True)
+        self._body.addSubview_(p)
+        self._panels["nothing"] = p
+        p.addArrangedSubview_(theme.make_label("✓ Nu au fost găsite fișiere orfane",
+                                               style="title2"))
+        p.addArrangedSubview_(theme.make_label(
+            "Toate fișierele audio scanate sunt asociate bibliotecii Serato.",
+            style="secondary"))
+        p.addArrangedSubview_(_spacer(8))
+        p.addArrangedSubview_(_button("Scanează din nou", self, b"backToBefore:"))
+
+    def backToBefore_(self, sender):
+        self._show("before")
+        self._refreshLocations()
+
+    # ---- RESULTS FOUND ----
+    @objc.python_method
+    def _buildResults(self):
+        p = NSView.alloc().initWithFrame_(self._body.bounds())
+        p.setAutoresizingMask_(_AUTOSIZE)
+        p.setHidden_(True)
+        self._body.addSubview_(p)
+        self._panels["results"] = p
+        y = p.bounds().size.height
+        self._summary = theme.make_label("", style="headline")
+        self._summary.setFrame_(NSMakeRect(0, y - 30, 600, 20))
+        self._summary.setAutoresizingMask_(1 << 3)
+        p.addSubview_(self._summary)
+        self._oSearch = NSSearchField.alloc().initWithFrame_(NSMakeRect(0, y - 62, 260, 24))
+        self._oSearch.setAutoresizingMask_(1 << 3)
+        self._oSearch.setPlaceholderString_("Filtrează fișierele")
+        self._oSearch.setTarget_(self)
+        self._oSearch.setAction_(b"filterResults:")
+        p.addSubview_(self._oSearch)
+        self._tv, self._ds, scroll = _table(
+            ["file", "loc", "size"], ["Fișier", "Locație", "Mărime"],
+            [280, 300, 90], numeric=("size",))
+        scroll.setFrame_(NSMakeRect(0, 44, p.bounds().size.width, y - 62 - 44))
+        scroll.setAutoresizingMask_(_AUTOSIZE)
+        p.addSubview_(scroll)
+        from Foundation import NSNotificationCenter
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"resultsSelChanged:", "NSTableViewSelectionDidChangeNotification", self._tv)
+        # action bar
+        self._addBtn = NSButton.alloc().initWithFrame_(NSMakeRect(0, 6, 260, 30))
+        self._addBtn.setBezelStyle_(NSBezelStyleRounded)
+        self._addBtn.setTitle_("Adaugă în crate-ul „Orfane”")
+        self._addBtn.setTarget_(self)
+        self._addBtn.setAction_(b"addToCrate:")
+        p.addSubview_(self._addBtn)
+        rb = _button("Deschide în Finder", self, b"revealResult:")
+        rb.setFrame_(NSMakeRect(270, 6, 170, 28))
+        p.addSubview_(rb)
+        cb = _button("Copiază căile", self, b"copyResults:")
+        cb.setFrame_(NSMakeRect(448, 6, 150, 28))
+        p.addSubview_(cb)
+
+    # ---- scan ----
     def scan_(self, sender):
         lib = self._app.activeLibrary()
         if lib is None:
-            self._info.setStringValue_("Nicio bibliotecă activă.")
+            _alert("Nicio bibliotecă activă.")
             return
-        self._scanBtn.setEnabled_(False)
-        self._info.setStringValue_("Se scanează…")
-        self._app.log_(f"Scanez {lib.volume_root} după fișiere orfane…", "info", "orphans")
-        root = str(lib.volume_root)
+        root = self._scan_root or str(lib.volume_root)
         known = {t.abs_path for t in lib.tracks.values()}
+        self._show("scanning")
+        self._spin.startAnimation_(None)
+        self._scanMsg.setStringValue_("Se scanează…")
+        self._scanSub.setStringValue_(root)
+        self._app.log_(f"Scanez {root} după fișiere orfane…", "info", "orphans")
+        self._app._beginBusy_("orphans")
+
+        def progress(n):
+            AppHelper.callAfter(self._scanSub.setStringValue_,
+                                f"{theme.format_int(n)} fișiere inspectate — {root}")
 
         def work():
+            err = None
             try:
-                orphans = scanner.find_orphan_files(root, known)
+                found = scanner.find_orphan_files(root, known, progress_cb=progress)
             except Exception:
-                orphans = []
-                self._app.log_("Eroare scanare orfane:\n" + traceback.format_exc(), "error", "orphans")
-            AppHelper.callAfter(self._done_, orphans)
+                found, err = [], traceback.format_exc()
+            AppHelper.callAfter(self._scanDone_, found, err)
 
         threading.Thread(target=work, daemon=True).start()
 
-    def _done_(self, orphans):
-        self._scanBtn.setEnabled_(True)
-        total = 0
+    @objc.python_method
+    def _scanDone_(self, found, err):
+        self._spin.stopAnimation_(None)
+        self._app._endBusy_("orphans")
+        if err:
+            self._app.log_("Eroare scanare orfane:\n" + err, "error", "orphans")
+            _alert("Scanarea a eșuat (vezi Jurnal).")
+            self._show("before")
+            return
         rows = []
-        for p in orphans:
+        for pth in found:
+            pth = Path(pth)
             try:
-                sz = p.stat().st_size
+                sz = pth.stat().st_size
             except OSError:
                 sz = 0
-            total += sz
-            rows.append((str(p), _human(sz)))
-        self._ds.setData_(rows)
+            rows.append((str(pth), str(pth.parent), sz))
+        self._orphans = rows
+        self._app.log_(f"Scanare orfane: {len(rows)} găsite", "info", "orphans")
+        if not rows:
+            self._show("nothing")
+            return
+        total = sum(r[2] for r in rows)
+        self._summary.setStringValue_(
+            f"{theme.format_int(len(rows))} fișiere orfane · {theme.human_size(total)}")
+        self._applyResultsFilter()
+        self._show("results")
+
+    def filterResults_(self, sender):
+        self._applyResultsFilter()
+
+    @objc.python_method
+    def _applyResultsFilter(self):
+        q = self._oSearch.stringValue().lower()
+        self._filtered = sorted(
+            (r for r in self._orphans if not q or q in r[0].lower()),
+            key=lambda r: r[2], reverse=True)  # largest orphans first
+        self._ds.setData_([(Path(a).name, loc, theme.human_size(sz))
+                           for a, loc, sz in self._filtered])
         self._tv.reloadData()
-        if orphans:
-            self._info.setStringValue_(f"{len(orphans)} fișiere orfane · {_human(total)}")
-        else:
-            self._info.setStringValue_("✓ Nu au fost găsite fișiere orfane")
-        self._app.log_(f"Scanare orfane: {len(orphans)} găsite", "info", "orphans")
+        self._updateAddButton()
+
+    def resultsSelChanged_(self, note):
+        self._updateAddButton()
+
+    @objc.python_method
+    def _updateAddButton(self):
+        sel = self._tv.selectedRowIndexes().count()
+        k = sel if sel else len(self._filtered)
+        self._addBtn.setTitle_(f"Adaugă {theme.format_int(k)} în crate-ul „Orfane”")
+        self._addBtn.setEnabled_(k > 0)
+
+    @objc.python_method
+    def _rowAbs(self, row):
+        data = self._ds.data()
+        if not (0 <= row < len(data)):
+            return None
+        name, loc, _sz = data[row]
+        return str(Path(loc) / name)
+
+    @objc.python_method
+    def _selectedAbsPaths(self):
+        idx = self._tv.selectedRowIndexes()
+        if idx.count():
+            out = []
+            i = idx.firstIndex()
+            while i != _NSNotFound:
+                ap = self._rowAbs(i)
+                if ap:
+                    out.append(ap)
+                i = idx.indexGreaterThanIndex_(i)
+            return out
+        return [self._rowAbs(r) for r in range(len(self._ds.data()))]
+
+    def addToCrate_(self, sender):
+        lib = self._app.activeLibrary()
+        paths = self._selectedAbsPaths()
+        if lib is None or not paths:
+            return
+        a = NSAlert.alloc().init()
+        a.setMessageText_(f"Adaugi {len(paths)} fișiere în crate-ul „Orfane”?")
+        a.setInformativeText_("Se face întâi un backup la „database V2”. Fișierele "
+                              "sunt adăugate în crate și în baza de date Serato.")
+        a.addButtonWithTitle_("Adaugă")
+        a.addButtonWithTitle_("Anulează")
+        if a.runModal() != 1000:
+            return
+        self._app._beginBusy_("orphans")
+        self._app.log_(f"Adaug {len(paths)} orfane în crate-ul „Orfane”…", "info", "orphans")
+
+        def work():
+            err = None
+            try:
+                res = copier.add_orphans_to_crate(lib, paths, "Orfane")
+            except Exception:
+                res, err = (0, 0), traceback.format_exc()
+            AppHelper.callAfter(self._addDone_, res, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    @objc.python_method
+    def _addDone_(self, res, err):
+        self._app._endBusy_("orphans")
+        if err:
+            self._app.log_("Eroare la adăugarea orfanelor:\n" + err, "error", "orphans")
+            _alert("Adăugarea a eșuat (vezi Jurnal).")
+            return
+        in_crate, in_db = res
+        self._app.log_(f"Orfane adăugate: {in_crate} în crate, {in_db} în baza de date",
+                       "info", "orphans")
+        _alert("Fișiere adăugate în „Orfane”",
+               informative=f"{in_crate} în crate · {in_db} în „database V2”")
+        self._app.rescanLibraries_(None)
+        self._show("before")
+
+    def revealResult_(self, sender):
+        paths = self._selectedAbsPaths()[:1]
+        if not paths:
+            return
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+            [NSURL.fileURLWithPath_(paths[0])])
+
+    def copyResults_(self, sender):
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_("\n".join(self._selectedAbsPaths()), NSPasteboardTypeString)
+        self._app.log_("Căile fișierelor orfane copiate", "info", "orphans")
+
+    # ---- drag & drop a folder to set the scan location ----
+    def handleFolderDrop_(self, sender):
+        from Foundation import NSURL
+        urls = sender.draggingPasteboard().readObjectsForClasses_options_([NSURL], None)
+        for u in (urls or []):
+            p = u.path()
+            if p and Path(p).is_dir():
+                self._scan_root = p
+                self._show("before")
+                self._refreshLocations()
+                a = NSAlert.alloc().init()
+                a.setMessageText_("Scanezi acum acest folder pentru fișiere orfane?")
+                a.setInformativeText_(p)
+                a.addButtonWithTitle_("Scanează")
+                a.addButtonWithTitle_("Mai târziu")
+                if a.runModal() == 1000:
+                    self.scan_(None)
+                return True
+        return False
 
 
 # ------------------------------------------------------------------- Migrate
