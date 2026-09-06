@@ -121,6 +121,31 @@ def _copy_to_clipboard(text):
     pb.setString_forType_(text, NSPasteboardTypeString)
 
 
+def _empty_state(symbol, title, subtitle="", *, action=None, target=None, sel=None):
+    """A centered SF-symbol + title + one sentence (+ optional button). Returns
+    an NSStackView the caller places and toggles with setHidden_."""
+    from .sidebar import _symbol
+    st = NSStackView.alloc().initWithFrame_(NSMakeRect(0, 0, 380, 160))
+    st.setOrientation_(NSUserInterfaceLayoutOrientationVertical)
+    st.setAlignment_(9)  # centerX
+    st.setSpacing_(6)
+    img = _symbol(symbol, point=26)
+    if img is not None:
+        iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 34, 34))
+        iv.setImage_(img)
+        iv.setContentTintColor_(theme.tertiary_label())
+        st.addArrangedSubview_(iv)
+    st.addArrangedSubview_(theme.make_label(title, style="headline"))
+    if subtitle:
+        sub = theme.make_label(subtitle, style="secondary")
+        sub.setAlignment_(2)
+        st.addArrangedSubview_(sub)
+    if action and target and sel:
+        st.addArrangedSubview_(_spacer(6))
+        st.addArrangedSubview_(_button(action, target, sel))
+    return st
+
+
 import re as _re
 
 
@@ -968,11 +993,12 @@ class CratesScreen(BaseScreen):
         self._outlineScroll = os_
         body.addSubview_(os_)
 
-        # left: empty-state label (shown instead of the outline)
-        self._crateEmpty = theme.make_label("Biblioteca nu conține crate-uri.",
-                                            style="secondary")
-        self._crateEmpty.setFrame_(NSMakeRect(4, body.bounds().size.height - 40, 340, 18))
-        self._crateEmpty.setAutoresizingMask_(1 << 3)
+        # left: empty state (shown instead of the outline)
+        self._crateEmpty = _empty_state(
+            "square.stack.3d.up.slash", "Niciun crate",
+            "Biblioteca activă nu conține crate-uri Serato.")
+        self._crateEmpty.setFrame_(NSMakeRect(0, body.bounds().size.height / 2 - 60, 360, 130))
+        self._crateEmpty.setAutoresizingMask_(1 << 3 | 1 << 1)
         self._crateEmpty.setHidden_(True)
         body.addSubview_(self._crateEmpty)
 
@@ -2551,6 +2577,13 @@ class MetadataScreen(BaseScreen):
                                     body.bounds().size.height))
         scroll.setAutoresizingMask_(_AUTOSIZE)
         body.addSubview_(scroll)
+        self._mdEmpty = _empty_state("tag.slash", "Niciun rezultat",
+                                     "Ajustează filtrul sau căutarea.")
+        self._mdEmpty.setFrame_(NSMakeRect(20, body.bounds().size.height / 2 - 60,
+                                           body.bounds().size.width - 360, 130))
+        self._mdEmpty.setAutoresizingMask_(1 << 3 | 1 << 1)
+        self._mdEmpty.setHidden_(True)
+        body.addSubview_(self._mdEmpty)
         self._tv.setMenu_(_menu(self, _TRACK_MENU_ITEMS))  # UI-17
         from Foundation import NSNotificationCenter
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
@@ -2631,6 +2664,8 @@ class MetadataScreen(BaseScreen):
             self._rows = []
             self._ds.setData_([])
             self._tv.reloadData()
+            self._setEmpty_("music.note.list", "Nicio bibliotecă",
+                            "Scanează sau alege o bibliotecă Serato.")
             self._renderBulk()
             return
         mode = self._seg.selectedSegment()
@@ -2657,7 +2692,34 @@ class MetadataScreen(BaseScreen):
         self._ds.setData_([((t.artist or ""), (t.title or ""), (t.album or ""),
                             (t.genre or ""), Path(t.abs_path).name) for t in out])
         self._tv.reloadData()
+        if not out:
+            if q:
+                self._setEmpty_("magnifyingglass", "Niciun rezultat",
+                                f"Nimic pentru „{self._search.stringValue()}”.")
+            else:
+                self._setEmpty_("checkmark.circle", "Nimic de corectat",
+                                "Niciun track nu se potrivește acestui filtru.")
+        else:
+            self._mdEmpty.setHidden_(True)
         self._renderBulk()
+
+    @objc.python_method
+    def _setEmpty_(self, symbol, title, subtitle):
+        for sub in list(self._mdEmpty.arrangedSubviews()):
+            self._mdEmpty.removeArrangedSubview_(sub)
+            sub.removeFromSuperview()
+        from .sidebar import _symbol
+        img = _symbol(symbol, point=26)
+        if img is not None:
+            iv = NSImageView.alloc().initWithFrame_(NSMakeRect(0, 0, 34, 34))
+            iv.setImage_(img)
+            iv.setContentTintColor_(theme.tertiary_label())
+            self._mdEmpty.addArrangedSubview_(iv)
+        self._mdEmpty.addArrangedSubview_(theme.make_label(title, style="headline"))
+        s = theme.make_label(subtitle, style="secondary")
+        s.setAlignment_(2)
+        self._mdEmpty.addArrangedSubview_(s)
+        self._mdEmpty.setHidden_(False)
 
     # ---- bulk editor ----
     @objc.python_method
