@@ -31,6 +31,7 @@ NAV = [
     ("__tools", "INSTRUMENTE", None, True),
     ("migrate", "Migrare", "shippingbox", False),
     ("metadata", "Metadata", "tag", False),
+    ("rename", "Redenumire", "textformat", False),
     ("__system", "SISTEM", None, True),
     ("journal", "Jurnal", "list.bullet.rectangle", False),
 ]
