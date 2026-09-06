@@ -39,10 +39,16 @@ class CommandPaletteController(NSWindowController):
         self._shown = []
 
         bg = NSVisualEffectView.alloc().initWithFrame_(((0, 0), (520, 340)))
-        bg.setMaterial_(18)  # HUD-ish window material
-        bg.setState_(1)
+        bg.setMaterial_(6)          # NSVisualEffectMaterialPopover
+        bg.setBlendingMode_(0)      # behindWindow — real vibrancy
+        bg.setState_(1)             # active
+        try:
+            bg.setEmphasized_(True)
+        except Exception:
+            pass
         bg.setWantsLayer_(True)
         bg.layer().setCornerRadius_(12.0)
+        bg.layer().setMasksToBounds_(True)
         panel.setContentView_(bg)
 
         self._field = NSSearchField.alloc().initWithFrame_(NSMakeRect(16, 292, 488, 32))

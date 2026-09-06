@@ -2567,28 +2567,32 @@ class MetadataScreen(BaseScreen):
             v, "Metadata", "Găsește și corectează Artist / Titlu / Album / Gen")
         y = v.bounds().size.height
 
+        w = v.bounds().size.width
         from AppKit import NSSegmentedControl
-        seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(24, y - 96, 420, 24))
+        seg = NSSegmentedControl.alloc().initWithFrame_(NSMakeRect(24, y - 96, 372, 24))
         seg.setSegmentCount_(4)
         for i, t in enumerate(("Toate", "Incomplete", "Fără artist", "Fără titlu")):
             seg.setLabel_forSegment_(t, i)
-            seg.setWidth_forSegment_(104, i)
+            seg.setWidth_forSegment_(93, i)
         seg.setSelectedSegment_(0)
         seg.setTarget_(self); seg.setAction_(b"filterChanged:")
         seg.setAutoresizingMask_(1 << 3)
         self._seg = seg
         v.addSubview_(seg)
 
-        self._search = NSSearchField.alloc().initWithFrame_(NSMakeRect(456, y - 96, 240, 24))
-        self._search.setAutoresizingMask_(1 << 3)
+        # "Analizează…" right-anchored; search fills the gap between
+        an = _button("Analizează…", self, b"analyze:")
+        an.setFrame_(NSMakeRect(w - 24 - 130, y - 98, 130, 28))
+        an.setToolTip_("Detectează Artist / Titlu lipsă și propune corectări")
+        an.setAutoresizingMask_(1 << 3 | 1 << 0)  # pinned to the right edge
+        v.addSubview_(an)
+
+        self._search = NSSearchField.alloc().initWithFrame_(
+            NSMakeRect(406, y - 96, w - 24 - 130 - 12 - 406, 24))
+        self._search.setAutoresizingMask_(1 << 3 | 1 << 1)  # width grows with window
         self._search.setPlaceholderString_("Caută")
         self._search.setTarget_(self); self._search.setAction_(b"filterChanged:")
         v.addSubview_(self._search)
-
-        an = _button("Analizează Artist/Titlu lipsă", self, b"analyze:")
-        an.setFrame_(NSMakeRect(708, y - 98, 240, 28))
-        an.setAutoresizingMask_(1 << 3 | 1 << 0)
-        v.addSubview_(an)
 
         body = self._bodyContainerIn_(v, top=112)
         # left: results table
