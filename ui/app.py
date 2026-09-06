@@ -348,6 +348,7 @@ class AppDelegate(NSObject):
         self._journal = []          # list[(NSDate, level, op, msg)]
         self._busy = 0
         self._op_status = ""
+        self._meta_undo = []
         return self
 
     # --- lifecycle ---
@@ -470,6 +471,60 @@ class AppDelegate(NSObject):
     def clearJournal(self):
         self._journal = []
 
+    # --- metadata-edit undo (UI-23) ---
+    @objc.python_method
+    def pushMetaUndo(self, root, old_edits, write_id3, label):
+        """old_edits: {raw_path: {serato_tag: previous_value}} — enough to
+        reverse the last metadata_editor.apply_edits call."""
+        if not old_edits:
+            return
+        self._meta_undo = getattr(self, "_meta_undo", [])
+        self._meta_undo.append((root, old_edits, bool(write_id3), label))
+        del self._meta_undo[:-20]
+
+    def canUndoMeta(self):
+        return bool(getattr(self, "_meta_undo", []))
+
+    def undoMetaEdit_(self, sender):
+        stack = getattr(self, "_meta_undo", [])
+        if not stack:
+            return
+        root, old_edits, write_id3, label = stack.pop()
+        lib = None
+        for l in self._libraries:
+            if str(l.volume_root) == root:
+                lib = l
+                break
+        if lib is None:
+            self.log_("Nu pot anula: biblioteca nu mai e disponibilă", "warn", "metadata")
+            return
+        import metadata_editor
+        self._beginBusy_("undo-metadata")
+        self.log_(f"Anulez: {label}", "info", "metadata")
+
+        def work():
+            err = None
+            try:
+                metadata_editor.apply_edits(lib, old_edits, write_id3=write_id3)
+            except Exception:
+                err = traceback.format_exc()
+            AppHelper.callAfter(self._undoMetaDone_, err)
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def _undoMetaDone_(self, err):
+        self._endBusy_("undo-metadata")
+        if err:
+            self.log_("Anularea a eșuat:\n" + err, "error", "metadata")
+            return
+        self.log_("Editare de metadata anulată", "info", "metadata")
+        self.rescanLibraries_(None)
+
+    def validateMenuItem_(self, item):
+        if item.action() == b"undoMetaEdit:":
+            return self.canUndoMeta()
+        return True
+
     # --- busy / close guard ---
     def _beginBusy_(self, label):
         self._busy += 1
@@ -558,6 +613,9 @@ class AppDelegate(NSObject):
         edit_menu.addItem_(NSMenuItem.separatorItem())
         m = edit_menu.addItemWithTitle_action_keyEquivalent_("Găsește", b"focusSearch:", "f")
         m.setTarget_(self)
+        self._undoMetaItem = edit_menu.addItemWithTitle_action_keyEquivalent_(
+            "Anulează ultima editare de metadata", b"undoMetaEdit:", "")
+        self._undoMetaItem.setTarget_(self)
 
         # Bibliotecă menu
         lib_item = NSMenuItem.alloc().init()

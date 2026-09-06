@@ -2835,7 +2835,13 @@ class MetadataScreen(BaseScreen):
         if a.runModal() != 1000:
             return
         edits = {t.raw_path: {tag: val for tag, (_l, val) in changes.items()} for t in sel}
+        keymap = {tg: k for k, tg, _l in _MD_FIELDS}
+        prev = {t.raw_path: {tg: (getattr(t, keymap[tg], "") or "")
+                             for tg in changes} for t in sel}
         write_id3 = self._bId3.state() == 1
+        if hasattr(self._app, "pushMetaUndo"):
+            self._app.pushMetaUndo(str(lib.volume_root), prev, write_id3,
+                                   f"editare în bloc ({len(sel)} track-uri)")
         self._app._beginBusy_("metadata")
         self._app.log_(f"Metadata în bloc: {len(edits)} track-uri, câmpuri "
                        + ", ".join(l for l, _v in changes.values()), "info", "metadata")
@@ -2904,6 +2910,10 @@ class MetadataScreen(BaseScreen):
             return
         lib = self._app.activeLibrary()
         edits = {s.raw_path: {"tart": s.new_artist, "tsng": s.new_title} for s in sugg}
+        prev = {s.raw_path: {"tart": s.old_artist, "tsng": s.old_title} for s in sugg}
+        if hasattr(self._app, "pushMetaUndo"):
+            self._app.pushMetaUndo(str(lib.volume_root), prev, True,
+                                   f"corectare Artist/Titlu ({len(sugg)} track-uri)")
         self._app._beginBusy_("metadata")
 
         def work():
