@@ -20,7 +20,7 @@ from AppKit import (
     NSImageView, NSPopUpButton, NSAlert, NSAttributedString,
     NSForegroundColorAttributeName, NSFontAttributeName,
 )
-from Foundation import NSObject, NSMakeRect, NSDate
+from Foundation import NSObject, NSMakeRect, NSDate, NSIndexSet
 from PyObjCTools import AppHelper
 
 import scanner
@@ -380,6 +380,10 @@ class CratesScreen(BaseScreen):
         from Foundation import NSNotificationCenter
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, b"crateSelected:", "NSTableViewSelectionDidChangeNotification", self._cratesTv)
+        NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            self, b"trackSelected:", "NSTableViewSelectionDidChangeNotification", self._tracksTv)
+        self._crate_tracks = []   # Track|None per visible row, index-aligned
+        self._inspector = None
         self.render()
 
     def didBecomeVisible(self):
@@ -388,6 +392,48 @@ class CratesScreen(BaseScreen):
     def librariesChanged(self):
         self.render()
 
+    # -- Track Inspector (UI-15) --
+    @objc.python_method
+    def _ensureInspector(self):
+        if self._inspector is None:
+            from .track_inspector import TrackInspector
+            self._inspector = TrackInspector.alloc().initWithApp_(self._app)
+        return self._inspector
+
+    def inspectorView(self):
+        if getattr(self, "_selected_track", None) is None:
+            return None
+        return self._ensureInspector().view()
+
+    def trackSelected_(self, note):
+        row = self._tracksTv.selectedRow()
+        lib = self._app.activeLibrary()
+        track = None
+        if 0 <= row < len(self._crate_tracks) and lib is not None:
+            track = self._crate_tracks[row]
+        self._selected_track = track
+        if track is not None:
+            self._ensureInspector().set_track(lib, track, on_saved=self._trackEdited)
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
+
+    @objc.python_method
+    def _trackEdited(self):
+        # a metadata save changed the in-memory Track -> refresh the visible row
+        row = self._tracksTv.selectedRow()
+        if 0 <= row < len(self._crate_tracks):
+            t = self._crate_tracks[row]
+            data = list(self._tracksDs.data())
+            if row < len(data):
+                cur = list(data[row])
+                cur[1] = (t.artist or "") if t else ""
+                cur[2] = (t.title or "") if t else ""
+                data[row] = tuple(cur)
+                self._tracksDs.setData_(data)
+                self._tracksTv.reloadData()
+                self._tracksTv.selectRowIndexes_byExtendingSelection_(
+                    NSIndexSet.indexSetWithIndex_(row), False)
+
     def render(self):
         lib = self._app.activeLibrary()
         self._crates = lib.crates if lib else []
@@ -395,6 +441,10 @@ class CratesScreen(BaseScreen):
         self._cratesTv.reloadData()
         self._tracksDs.setData_([])
         self._tracksTv.reloadData()
+        self._crate_tracks = []
+        self._selected_track = None
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
 
     def crateSelected_(self, note):
         row = self._cratesTv.selectedRow()
@@ -403,13 +453,19 @@ class CratesScreen(BaseScreen):
             return
         crate = self._crates[row]
         rows = []
+        tracks = []
         for rp in crate.raw_paths:
             ap = Path(lib.volume_root) / rp
             t = lib.tracks.get(rp)
+            tracks.append(t)
             rows.append(("✓" if ap.exists() else "⚠",
                          (t.artist if t else "") or "", (t.title if t else "") or "", str(ap)))
+        self._crate_tracks = tracks
+        self._selected_track = None
         self._tracksDs.setData_(rows)
         self._tracksTv.reloadData()
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
 
 
 # ------------------------------------------------------------------- Orphans
