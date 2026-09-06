@@ -84,26 +84,43 @@ def _alert(message, *, informative=None, style=0):
 
 
 def _menu(target, items):
-    """items: list of (title, b"selector:") or (None, None) for a separator."""
+    """items: (title, b"selector:") or (title, b"selector:", "keyEquiv") or
+    (None, None) for a separator."""
     from AppKit import NSMenu, NSMenuItem
     m = NSMenu.alloc().init()
-    for title, sel in items:
+    for entry in items:
+        title, sel = entry[0], entry[1]
+        key = entry[2] if len(entry) > 2 else ""
         if title is None:
             m.addItem_(NSMenuItem.separatorItem())
             continue
-        it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+        it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, key)
+        if key == " ":
+            it.setKeyEquivalentModifierMask_(0)
         it.setTarget_(target)
         m.addItem_(it)
     return m
 
 
 _TRACK_MENU_ITEMS = [
+    ("Previzualizează", b"ctxQuickLook:", " "),
     ("Deschide în Finder", b"ctxReveal:"),
     ("Editează metadata", b"ctxEditMeta:"),
     (None, None),
     ("Copiază calea", b"ctxCopyPath:"),
     ("Rescanează", b"ctxRescan:"),
 ]
+
+
+def _quicklook(path):
+    import subprocess
+    if not path or not Path(path).exists():
+        return
+    try:
+        subprocess.Popen(["qlmanage", "-p", str(path)],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    except Exception:
+        pass
 
 
 def _reveal_paths(paths):
@@ -1044,6 +1061,11 @@ class CratesScreen(BaseScreen):
         if 0 <= row < len(self._crate_tracks):
             return self._crate_tracks[row]
         return None
+
+    def ctxQuickLook_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _quicklook(t.abs_path)
 
     def ctxReveal_(self, sender):
         t = self._ctxTrack()
@@ -2630,6 +2652,11 @@ class MetadataScreen(BaseScreen):
         if 0 <= row < len(self._rows):
             return self._rows[row]
         return None
+
+    def ctxQuickLook_(self, sender):
+        t = self._ctxTrack()
+        if t:
+            _quicklook(t.abs_path)
 
     def ctxReveal_(self, sender):
         t = self._ctxTrack()
