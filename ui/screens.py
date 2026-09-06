@@ -809,26 +809,162 @@ class LibraryInspector(NSObject):
 
 
 # ------------------------------------------------------------------- Crates
+class _CrateNode:
+    """One row in the crate outline: a hierarchy segment that may also be a
+    crate itself (when `crate` is set)."""
+    __slots__ = ("name", "children", "crate", "count", "warn")
+
+    def __init__(self, name):
+        self.name = name
+        self.children = []
+        self.crate = None
+        self.count = 0
+        self.warn = 0
+
+
+def _build_crate_tree(lib, query=""):
+    from . import health as _health
+    q = (query or "").strip().lower()
+    index = {}
+    top = []
+    for crate in lib.crates:
+        prefix = ()
+        parent_children = top
+        node = None
+        for seg in crate.hierarchy:
+            prefix = prefix + (seg,)
+            node = index.get(prefix)
+            if node is None:
+                node = _CrateNode(seg)
+                index[prefix] = node
+                parent_children.append(node)
+            parent_children = node.children
+        node.crate = crate
+        node.count = len(crate.raw_paths)
+        node.warn = _health.crate_missing_count(lib, crate)
+
+    if not q:
+        return top
+
+    def keep(node):
+        node.children[:] = [c for c in node.children if keep(c)]
+        return q in node.name.lower() or bool(node.children)
+
+    return [n for n in top if keep(n)]
+
+
 class CratesScreen(BaseScreen):
     def build_(self, v):
+        self._top = []            # list[_CrateNode]
+        self._all_rows = []       # full (status,artist,title,path,Track) for the selected crate
+        self._crate_tracks = []   # Track|None per *visible* row
+        self._selected_crate = None
+        self._selected_track = None
+        self._inspector = None
+
         self._headerInto_title_subtitle_(v, "Crate-uri", None)
-        body = self._bodyContainerIn_(v)
-        self._cratesTv, self._cratesDs, cs = _table(["crate", "count"], ["Crate", "Track-uri"], [260, 90])
-        cs.setFrame_(NSMakeRect(0, 0, 360, body.bounds().size.height))
-        cs.setAutoresizingMask_(1 << 4)
-        body.addSubview_(cs)
+
+        # toolbar row: search + expand/collapse + track filter segmented
+        self._search = NSSearchField.alloc().initWithFrame_(
+            NSMakeRect(24, v.bounds().size.height - 108, 240, 24))
+        self._search.setAutoresizingMask_(1 << 3)
+        self._search.setPlaceholderString_("Filtrează crate-uri")
+        self._search.setTarget_(self)
+        self._search.setAction_(b"filterCrates:")
+        v.addSubview_(self._search)
+
+        bx = _button("Extinde tot", self, b"expandAll:")
+        bx.setFrame_(NSMakeRect(272, v.bounds().size.height - 110, 110, 26))
+        bx.setAutoresizingMask_(1 << 3)
+        v.addSubview_(bx)
+        bc = _button("Restrânge tot", self, b"collapseAll:")
+        bc.setFrame_(NSMakeRect(386, v.bounds().size.height - 110, 120, 26))
+        bc.setAutoresizingMask_(1 << 3)
+        v.addSubview_(bc)
+
+        from AppKit import NSSegmentedControl
+        seg = NSSegmentedControl.alloc().initWithFrame_(
+            NSMakeRect(v.bounds().size.width - 260, v.bounds().size.height - 110, 236, 24))
+        seg.setSegmentCount_(3)
+        for i, t in enumerate(("Toate", "OK", "Lipsă")):
+            seg.setLabel_forSegment_(t, i)
+            seg.setWidth_forSegment_(76, i)
+        seg.setSelectedSegment_(0)
+        seg.setAutoresizingMask_(1 << 0 | 1 << 3)
+        seg.setTarget_(self)
+        seg.setAction_(b"filterTracks:")
+        self._seg = seg
+        v.addSubview_(seg)
+
+        body = self._bodyContainerIn_(v, top=126)
+
+        # left: crate outline
+        from AppKit import (NSOutlineView, NSTableColumn, NSTableCellView,
+                            NSScrollView)
+        ov = NSOutlineView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, body.bounds().size.height))
+        col = NSTableColumn.alloc().initWithIdentifier_("main")
+        col.setWidth_(340)
+        ov.addTableColumn_(col)
+        ov.setOutlineTableColumn_(col)
+        ov.setHeaderView_(None)
+        ov.setRowSizeStyle_(1)
+        ov.setIndentationPerLevel_(14)
+        ov.setAutoresizesOutlineColumn_(False)
+        ov.setDataSource_(self)
+        ov.setDelegate_(self)
+        try:
+            ov.setStyle_(2)  # inset / source-list feel
+        except Exception:
+            pass
+        self._outline = ov
+        os_ = NSScrollView.alloc().initWithFrame_(NSMakeRect(0, 0, 360, body.bounds().size.height))
+        os_.setDocumentView_(ov)
+        os_.setHasVerticalScroller_(True)
+        os_.setBorderType_(0)
+        os_.setAutoresizingMask_(1 << 4)
+        self._outlineScroll = os_
+        body.addSubview_(os_)
+
+        # left: empty-state label (shown instead of the outline)
+        self._crateEmpty = theme.make_label("Biblioteca nu conține crate-uri.",
+                                            style="secondary")
+        self._crateEmpty.setFrame_(NSMakeRect(4, body.bounds().size.height - 40, 340, 18))
+        self._crateEmpty.setAutoresizingMask_(1 << 3)
+        self._crateEmpty.setHidden_(True)
+        body.addSubview_(self._crateEmpty)
+
+        # right: tracks table + its own empty state
         self._tracksTv, self._tracksDs, ts = _table(
-            ["status", "artist", "title", "path"], ["", "Artist", "Titlu", "Cale"], [30, 160, 200, 320])
+            ["status", "artist", "title", "path"], ["", "Artist", "Titlu", "Cale"],
+            [34, 170, 220, 320], numeric=())
         ts.setFrame_(NSMakeRect(372, 0, body.bounds().size.width - 372, body.bounds().size.height))
         ts.setAutoresizingMask_(_AUTOSIZE)
+        self._tracksScroll = ts
         body.addSubview_(ts)
+        self._tracksEmpty = theme.make_label(
+            "Selectează un crate pentru a vedea track-urile.", style="secondary")
+        self._tracksEmpty.setFrame_(NSMakeRect(380, body.bounds().size.height - 40,
+                                               body.bounds().size.width - 400, 18))
+        self._tracksEmpty.setAutoresizingMask_(1 << 3 | 1 << 1)
+        body.addSubview_(self._tracksEmpty)
+
         from Foundation import NSNotificationCenter
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
-            self, b"crateSelected:", "NSTableViewSelectionDidChangeNotification", self._cratesTv)
+            self, b"outlineSelChanged:", "NSOutlineViewSelectionDidChangeNotification", self._outline)
         NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
             self, b"trackSelected:", "NSTableViewSelectionDidChangeNotification", self._tracksTv)
-        self._crate_tracks = []   # Track|None per visible row, index-aligned
-        self._inspector = None
+
+        # crate context menu
+        from AppKit import NSMenu, NSMenuItem
+        m = NSMenu.alloc().init()
+        for title, sel in (("Deschide folderul în Finder", b"revealCrate:"),
+                           ("Copiază căile track-urilor", b"copyCratePaths:"),
+                           ("Rescanează", b"rescanFromCrate:")):
+            it = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(title, sel, "")
+            it.setTarget_(self)
+            m.addItem_(it)
+        self._outline.setMenu_(m)
+
         self.render()
 
     def didBecomeVisible(self):
@@ -836,6 +972,120 @@ class CratesScreen(BaseScreen):
 
     def librariesChanged(self):
         self.render()
+
+    # ---- render / data ----
+    def render(self):
+        lib = self._app.activeLibrary()
+        has_crates = bool(lib and lib.crates)
+        self._top = _build_crate_tree(lib, self._search.stringValue()) if has_crates else []
+        self._crateEmpty.setHidden_(has_crates)
+        self._outlineScroll.setHidden_(not has_crates)
+        self._outline.reloadData()
+        for n in self._top:
+            self._outline.expandItem_(n)
+        self._all_rows = []
+        self._crate_tracks = []
+        self._selected_crate = None
+        self._selected_track = None
+        self._tracksDs.setData_([])
+        self._tracksTv.reloadData()
+        self._tracksEmpty.setHidden_(False)
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
+
+    def filterCrates_(self, sender):
+        lib = self._app.activeLibrary()
+        self._top = _build_crate_tree(lib, self._search.stringValue()) if (lib and lib.crates) else []
+        self._outline.reloadData()
+        for n in self._top:
+            self._outline.expandItem_expandChildren_(n, True)
+
+    def expandAll_(self, sender):
+        for n in self._top:
+            self._outline.expandItem_expandChildren_(n, True)
+
+    def collapseAll_(self, sender):
+        for n in self._top:
+            self._outline.collapseItem_collapseChildren_(n, True)
+
+    # ---- NSOutlineView data source ----
+    def outlineView_numberOfChildrenOfItem_(self, ov, item):
+        return len(self._top) if item is None else len(item.children)
+
+    def outlineView_child_ofItem_(self, ov, idx, item):
+        return self._top[idx] if item is None else item.children[idx]
+
+    def outlineView_isItemExpandable_(self, ov, item):
+        return bool(item.children)
+
+    def outlineView_viewForTableColumn_item_(self, ov, col, item):
+        from AppKit import NSTableCellView
+        cell = ov.makeViewWithIdentifier_owner_("crate", self)
+        if cell is None:
+            cell = NSTableCellView.alloc().initWithFrame_(NSMakeRect(0, 0, 340, 22))
+            cell.setIdentifier_("crate")
+            name = theme.make_label("", style="body")
+            name.setFrame_(NSMakeRect(2, 3, 210, 16))
+            cell.addSubview_(name)
+            cell.setTextField_(name)
+            cnt = theme.make_label("", style="caption", color=theme.secondary_label())
+            cnt.setFrame_(NSMakeRect(214, 3, 64, 16))
+            cnt.setAlignment_(2)
+            cnt.setTag_(91)
+            cell.addSubview_(cnt)
+            warn = theme.make_label("", style="caption", color=theme.warn_color())
+            warn.setFrame_(NSMakeRect(280, 3, 56, 16))
+            warn.setTag_(92)
+            cell.addSubview_(warn)
+        cell.textField().setStringValue_(item.name)
+        cell.viewWithTag_(91).setStringValue_(theme.format_int(item.count) if item.crate else "")
+        cell.viewWithTag_(92).setStringValue_(f"⚠ {item.warn}" if item.warn else "")
+        return cell
+
+    def outlineView_heightOfRowByItem_(self, ov, item):
+        return 24.0
+
+    # ---- crate selection -> tracks ----
+    def outlineSelChanged_(self, note):
+        row = self._outline.selectedRow()
+        item = self._outline.itemAtRow_(row) if row >= 0 else None
+        lib = self._app.activeLibrary()
+        self._selected_track = None
+        if item is None or item.crate is None or lib is None:
+            self._selected_crate = None
+            self._all_rows = []
+            self._applyTrackFilter()
+            if self._app._router is not None:
+                self._app._router.refreshInspector()
+            return
+        self._selected_crate = item.crate
+        rows = []
+        for rp in item.crate.raw_paths:
+            ap = Path(lib.volume_root) / rp
+            t = lib.tracks.get(rp)
+            rows.append(("✓" if ap.exists() else "⚠",
+                         (t.artist if t else "") or "", (t.title if t else "") or "",
+                         str(ap), t))
+        self._all_rows = rows
+        self._applyTrackFilter()
+        if self._app._router is not None:
+            self._app._router.refreshInspector()
+
+    def filterTracks_(self, sender):
+        self._applyTrackFilter()
+
+    @objc.python_method
+    def _applyTrackFilter(self):
+        mode = self._seg.selectedSegment()  # 0 all, 1 ok, 2 missing
+        rows = self._all_rows
+        if mode == 1:
+            rows = [r for r in rows if r[0] == "✓"]
+        elif mode == 2:
+            rows = [r for r in rows if r[0] != "✓"]
+        self._crate_tracks = [r[4] for r in rows]
+        self._tracksDs.setData_([r[:4] for r in rows])
+        self._tracksTv.reloadData()
+        self._tracksEmpty.setHidden_(bool(self._selected_crate))
 
     # -- Track Inspector (UI-15) --
     @objc.python_method
@@ -864,7 +1114,6 @@ class CratesScreen(BaseScreen):
 
     @objc.python_method
     def _trackEdited(self):
-        # a metadata save changed the in-memory Track -> refresh the visible row
         row = self._tracksTv.selectedRow()
         if 0 <= row < len(self._crate_tracks):
             t = self._crate_tracks[row]
@@ -879,38 +1128,47 @@ class CratesScreen(BaseScreen):
                 self._tracksTv.selectRowIndexes_byExtendingSelection_(
                     NSIndexSet.indexSetWithIndex_(row), False)
 
-    def render(self):
-        lib = self._app.activeLibrary()
-        self._crates = lib.crates if lib else []
-        self._cratesDs.setData_([(c.display_name, str(len(c.raw_paths))) for c in self._crates])
-        self._cratesTv.reloadData()
-        self._tracksDs.setData_([])
-        self._tracksTv.reloadData()
-        self._crate_tracks = []
-        self._selected_track = None
-        if self._app._router is not None:
-            self._app._router.refreshInspector()
+    # ---- crate context menu ----
+    @objc.python_method
+    def _menuCrate(self):
+        row = self._outline.clickedRow()
+        if row < 0:
+            row = self._outline.selectedRow()
+        item = self._outline.itemAtRow_(row) if row >= 0 else None
+        return item.crate if item is not None else None
 
-    def crateSelected_(self, note):
-        row = self._cratesTv.selectedRow()
+    def revealCrate_(self, sender):
+        crate = self._menuCrate()
         lib = self._app.activeLibrary()
-        if row < 0 or lib is None or row >= len(self._crates):
+        if crate is None or lib is None:
             return
-        crate = self._crates[row]
-        rows = []
-        tracks = []
+        from AppKit import NSWorkspace
+        from Foundation import NSURL
+        # reveal the folder that holds this crate's first present track
         for rp in crate.raw_paths:
             ap = Path(lib.volume_root) / rp
-            t = lib.tracks.get(rp)
-            tracks.append(t)
-            rows.append(("✓" if ap.exists() else "⚠",
-                         (t.artist if t else "") or "", (t.title if t else "") or "", str(ap)))
-        self._crate_tracks = tracks
-        self._selected_track = None
-        self._tracksDs.setData_(rows)
-        self._tracksTv.reloadData()
-        if self._app._router is not None:
-            self._app._router.refreshInspector()
+            if ap.exists():
+                NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+                    [NSURL.fileURLWithPath_(str(ap))])
+                return
+        NSWorkspace.sharedWorkspace().activateFileViewerSelectingURLs_(
+            [NSURL.fileURLWithPath_(str(crate.file_path))])
+
+    def copyCratePaths_(self, sender):
+        crate = self._menuCrate()
+        lib = self._app.activeLibrary()
+        if crate is None or lib is None:
+            return
+        from AppKit import NSPasteboard, NSPasteboardTypeString
+        paths = "\n".join(str(Path(lib.volume_root) / rp) for rp in crate.raw_paths)
+        pb = NSPasteboard.generalPasteboard()
+        pb.clearContents()
+        pb.setString_forType_(paths, NSPasteboardTypeString)
+        self._app.log_(f"{len(crate.raw_paths)} căi copiate din „{crate.display_name}”",
+                       "info", "crates")
+
+    def rescanFromCrate_(self, sender):
+        self._app.rescanLibraries_(None)
 
 
 # ------------------------------------------------------------------- Orphans
